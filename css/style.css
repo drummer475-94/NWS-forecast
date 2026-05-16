@@ -267,6 +267,17 @@ button#geo-btn:hover {
     gap: 8px;
 }
 
+.btn-group {
+    display: flex;
+    gap: 4px;
+}
+
+.radar-time {
+    font-size: 0.85rem;
+    color: var(--accent-color);
+    font-weight: 500;
+}
+
 .toggle-btn {
     padding: 6px 12px;
     font-size: 0.8rem;
@@ -274,6 +285,14 @@ button#geo-btn:hover {
     color: var(--text-primary);
     border: 1px solid var(--glass-border);
     border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.toggle-btn i {
+    width: 14px;
+    height: 14px;
 }
 
 .toggle-btn.active {

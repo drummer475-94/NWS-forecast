@@ -81,10 +81,16 @@
                 <!-- Radar Map -->
                 <section class="glass-panel map-card">
                     <div class="card-header">
-                        <h2>Live Radar</h2>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <h2>Live Radar</h2>
+                            <span id="radar-time" class="radar-time">Loading...</span>
+                        </div>
                         <div class="radar-controls">
-                            <button type="button" id="toggle-hd-radar" class="toggle-btn active">HD</button>
-                            <button type="button" id="toggle-normal-radar" class="toggle-btn">Normal</button>
+                            <div class="btn-group">
+                                <button type="button" id="toggle-map" class="toggle-btn active">Map</button>
+                                <button type="button" id="toggle-sat" class="toggle-btn">Sat</button>
+                            </div>
+                            <button type="button" id="toggle-play" class="toggle-btn" title="Play/Pause"><i data-lucide="play"></i></button>
                         </div>
                     </div>
                     <div id="radar-map" class="map-container"></div>
