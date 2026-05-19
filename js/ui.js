@@ -59,8 +59,7 @@ const UI = {
         const pop = current.probabilityOfPrecipitation?.value || 0;
         document.getElementById('current-precip').textContent = `${pop}%`;
 
-        // Dewpoint, Humidity, Feels Like
-        let dewpoint = '--';
+        // Humidity, Feels Like
         let humidity = '--';
         let feelsLike = `${current.temperature}°${current.temperatureUnit}`;
         
@@ -75,23 +74,7 @@ const UI = {
                     feelsLike = `${fl}°F`;
                 }
             }
-            
-            if (hourlyCurrent.dewpoint && hourlyCurrent.dewpoint.value !== null) {
-                const dpC = hourlyCurrent.dewpoint.value;
-                const dpVal = current.temperatureUnit === 'F' ? this.celsiusToFahrenheit(dpC) : Math.round(dpC);
-                dewpoint = `${dpVal}°${current.temperatureUnit}`;
-            } else if (current.dewpoint && current.dewpoint.value !== null) {
-                const dpC = current.dewpoint.value;
-                const dpVal = current.temperatureUnit === 'F' ? this.celsiusToFahrenheit(dpC) : Math.round(dpC);
-                dewpoint = `${dpVal}°${current.temperatureUnit}`;
-            }
-        } else if (current.dewpoint && current.dewpoint.value !== null) {
-            const dpC = current.dewpoint.value;
-            const dpVal = current.temperatureUnit === 'F' ? this.celsiusToFahrenheit(dpC) : Math.round(dpC);
-            dewpoint = `${dpVal}°${current.temperatureUnit}`;
         }
-
-        document.getElementById('current-dewpoint').textContent = dewpoint;
         
         const humidityEl = document.getElementById('current-humidity');
         if (humidityEl) humidityEl.textContent = humidity;
