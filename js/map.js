@@ -106,7 +106,8 @@ const MapService = {
                 const layer = L.tileLayer(`https://tilecache.rainviewer.com${frame.path}/256/{z}/{x}/{y}/2/1_1.png`, {
                     opacity: 0,
                     zIndex: 10 + index, // ensure they sit on top of base map
-                    transparent: true
+                    transparent: true,
+                    maxNativeZoom: 10
                 });
                 layer.addTo(mapInstance);
                 return layer;

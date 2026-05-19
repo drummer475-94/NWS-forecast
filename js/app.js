@@ -84,10 +84,15 @@ const App = {
             
             // 2. Fetch Forecast
             const forecastUrl = pointsData.properties.forecast;
-            const forecastData = await API.getForecast(forecastUrl);
+            const hourlyUrl = pointsData.properties.forecastHourly;
+            
+            const [forecastData, hourlyData] = await Promise.all([
+                API.getForecast(forecastUrl),
+                API.getForecast(hourlyUrl).catch(() => null)
+            ]);
 
             // 3. Update UI
-            UI.renderCurrentConditions(locationName, forecastData);
+            UI.renderCurrentConditions(locationName, forecastData, hourlyData);
             UI.renderForecast(forecastData);
 
             // 4. Update Map

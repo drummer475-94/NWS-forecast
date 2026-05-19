@@ -19,7 +19,26 @@ const UI = {
         return Math.round((c * 9/5) + 32);
     },
 
-    renderCurrentConditions(locationName, forecastData) {
+    calculateFeelsLike(tempF, humidity, windSpeedStr) {
+        let windMph = 0;
+        if (windSpeedStr) {
+            const match = windSpeedStr.match(/(\d+)/);
+            if (match) windMph = parseInt(match[1], 10);
+        }
+        
+        if (tempF <= 50 && windMph > 3) {
+            return Math.round(35.74 + 0.6215 * tempF - 35.75 * Math.pow(windMph, 0.16) + 0.4275 * tempF * Math.pow(windMph, 0.16));
+        }
+        if (tempF >= 80 && humidity !== null && humidity !== undefined) {
+            const t = tempF;
+            const rh = humidity;
+            const hi = -42.379 + 2.04901523 * t + 10.14333127 * rh - 0.22475541 * t * rh - 0.00683783 * t * t - 0.05481717 * rh * rh + 0.00122874 * t * t * rh + 0.00085282 * t * rh * rh - 0.00000199 * t * t * rh * rh;
+            return Math.round(hi);
+        }
+        return tempF;
+    },
+
+    renderCurrentConditions(locationName, forecastData, hourlyData) {
         document.getElementById('location-name').textContent = locationName;
         
         const current = forecastData.properties.periods[0]; // Currently or rest of today
@@ -40,14 +59,45 @@ const UI = {
         const pop = current.probabilityOfPrecipitation?.value || 0;
         document.getElementById('current-precip').textContent = `${pop}%`;
 
-        // Dewpoint (comes in Celsius usually, convert if temp is F)
+        // Dewpoint, Humidity, Feels Like
         let dewpoint = '--';
-        if (current.dewpoint && current.dewpoint.value !== null) {
+        let humidity = '--';
+        let feelsLike = `${current.temperature}°${current.temperatureUnit}`;
+        
+        if (hourlyData && hourlyData.properties && hourlyData.properties.periods && hourlyData.properties.periods.length > 0) {
+            const hourlyCurrent = hourlyData.properties.periods[0];
+            
+            if (hourlyCurrent.relativeHumidity && hourlyCurrent.relativeHumidity.value !== null) {
+                humidity = `${Math.round(hourlyCurrent.relativeHumidity.value)}%`;
+                
+                if (current.temperatureUnit === 'F') {
+                    const fl = this.calculateFeelsLike(current.temperature, hourlyCurrent.relativeHumidity.value, current.windSpeed);
+                    feelsLike = `${fl}°F`;
+                }
+            }
+            
+            if (hourlyCurrent.dewpoint && hourlyCurrent.dewpoint.value !== null) {
+                const dpC = hourlyCurrent.dewpoint.value;
+                const dpVal = current.temperatureUnit === 'F' ? this.celsiusToFahrenheit(dpC) : Math.round(dpC);
+                dewpoint = `${dpVal}°${current.temperatureUnit}`;
+            } else if (current.dewpoint && current.dewpoint.value !== null) {
+                const dpC = current.dewpoint.value;
+                const dpVal = current.temperatureUnit === 'F' ? this.celsiusToFahrenheit(dpC) : Math.round(dpC);
+                dewpoint = `${dpVal}°${current.temperatureUnit}`;
+            }
+        } else if (current.dewpoint && current.dewpoint.value !== null) {
             const dpC = current.dewpoint.value;
-            dewpoint = current.temperatureUnit === 'F' ? this.celsiusToFahrenheit(dpC) : Math.round(dpC);
-            dewpoint = `${dewpoint}°${current.temperatureUnit}`;
+            const dpVal = current.temperatureUnit === 'F' ? this.celsiusToFahrenheit(dpC) : Math.round(dpC);
+            dewpoint = `${dpVal}°${current.temperatureUnit}`;
         }
+
         document.getElementById('current-dewpoint').textContent = dewpoint;
+        
+        const humidityEl = document.getElementById('current-humidity');
+        if (humidityEl) humidityEl.textContent = humidity;
+        
+        const feelsLikeEl = document.getElementById('current-feels-like');
+        if (feelsLikeEl) feelsLikeEl.textContent = feelsLike;
 
         // Re-initialize Lucide icons to apply the newly set data-lucide attribute
         lucide.createIcons();
