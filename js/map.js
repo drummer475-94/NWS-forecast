@@ -107,7 +107,7 @@ const MapService = {
                     opacity: 0,
                     zIndex: 10 + index, // ensure they sit on top of base map
                     transparent: true,
-                    maxNativeZoom: 10
+                    maxNativeZoom: 7
                 });
                 layer.addTo(mapInstance);
                 return layer;
