@@ -425,4 +425,17 @@ button#geo-btn:hover {
     .forecast-precip {
         margin-top: 0;
     }
+
+    .card-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+    }
+
+    .radar-controls {
+        width: 100%;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
 }

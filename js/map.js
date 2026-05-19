@@ -3,9 +3,14 @@ let baseMapLayer = null;
 let satMapLayer = null;
 let currentBaseLayer = null;
 
-// RainViewer Animation State
+// RainViewer & Satellite Animation State
+let currentOverlayMode = 'radar'; // 'radar', 'clouds', 'vapor'
 let radarFrames = [];
 let radarLayers = [];
+let cloudFrames = [];
+let cloudLayers = [];
+let vaporLayer = null;
+
 let currentFrameIndex = 0;
 let animationTimer = null;
 let isPlaying = false;
@@ -88,6 +93,56 @@ const MapService = {
                 }
             });
         }
+
+        // Overlay Mode Toggles
+        const radarBtn = document.getElementById('toggle-radar');
+        const cloudsBtn = document.getElementById('toggle-clouds');
+        const vaporBtn = document.getElementById('toggle-vapor');
+
+        if (radarBtn && cloudsBtn && vaporBtn) {
+            radarBtn.addEventListener('click', () => {
+                currentOverlayMode = 'radar';
+                radarBtn.classList.add('active');
+                cloudsBtn.classList.remove('active');
+                vaporBtn.classList.remove('active');
+                this.updatePlayButtonState();
+                this.showFrame(currentFrameIndex);
+            });
+            
+            cloudsBtn.addEventListener('click', () => {
+                currentOverlayMode = 'clouds';
+                cloudsBtn.classList.add('active');
+                radarBtn.classList.remove('active');
+                vaporBtn.classList.remove('active');
+                this.updatePlayButtonState();
+                this.showFrame(currentFrameIndex);
+            });
+            
+            vaporBtn.addEventListener('click', () => {
+                currentOverlayMode = 'vapor';
+                vaporBtn.classList.add('active');
+                radarBtn.classList.remove('active');
+                cloudsBtn.classList.remove('active');
+                this.updatePlayButtonState();
+                this.showFrame(currentFrameIndex);
+            });
+        }
+    },
+
+    updatePlayButtonState() {
+        const playBtn = document.getElementById('toggle-play');
+        if (!playBtn) return;
+        
+        if (currentOverlayMode === 'vapor') {
+            playBtn.setAttribute('disabled', 'true');
+            playBtn.style.opacity = '0.5';
+            playBtn.style.cursor = 'not-allowed';
+            this.stopAnimation();
+        } else {
+            playBtn.removeAttribute('disabled');
+            playBtn.style.opacity = '1';
+            playBtn.style.cursor = 'pointer';
+        }
     },
 
     async setupRainViewer() {
@@ -98,10 +153,13 @@ const MapService = {
             const response = await fetch('https://api.rainviewer.com/public/weather-maps.json');
             const data = await response.json();
             
-            // We'll use past radar frames. Grab the last 8 frames to not overload the map
+            // Grab last 8 frames
             radarFrames = data.radar.past.slice(-8); 
+            if (data.satellite && data.satellite.infrared) {
+                cloudFrames = data.satellite.infrared.slice(-8);
+            }
 
-            // Create tile layers for each frame
+            // Create tile layers for radar
             radarLayers = radarFrames.map((frame, index) => {
                 const layer = L.tileLayer(`https://tilecache.rainviewer.com${frame.path}/256/{z}/{x}/{y}/2/1_1.png`, {
                     opacity: 0,
@@ -112,6 +170,29 @@ const MapService = {
                 layer.addTo(mapInstance);
                 return layer;
             });
+
+            // Create tile layers for clouds
+            if (cloudFrames.length > 0) {
+                cloudLayers = cloudFrames.map((frame, index) => {
+                    const layer = L.tileLayer(`https://tilecache.rainviewer.com${frame.path}/256/{z}/{x}/{y}/2/1_1.png`, {
+                        opacity: 0,
+                        zIndex: 10 + index,
+                        transparent: true,
+                        maxNativeZoom: 7
+                    });
+                    layer.addTo(mapInstance);
+                    return layer;
+                });
+            }
+
+            // Create GOES Water Vapor layer
+            vaporLayer = L.tileLayer('https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-east-wv-ch08/{z}/{x}/{y}.png', {
+                opacity: 0,
+                zIndex: 15,
+                transparent: true,
+                maxNativeZoom: 10
+            });
+            vaporLayer.addTo(mapInstance);
 
             // Set initial state (show last frame)
             currentFrameIndex = radarLayers.length - 1;
@@ -124,24 +205,38 @@ const MapService = {
     },
 
     showFrame(index) {
-        if (!radarLayers.length) return;
-        
-        // Hide all frames
+        // Hide all layers first
         radarLayers.forEach(layer => layer.setOpacity(0));
+        cloudLayers.forEach(layer => layer.setOpacity(0));
+        if (vaporLayer) vaporLayer.setOpacity(0);
         
-        // Show current frame
-        radarLayers[index].setOpacity(0.7); // 0.7 opacity to see base map through it
-
-        // Update time display
         const timeDisplay = document.getElementById('radar-time');
-        if (timeDisplay) {
-            const frameTime = new Date(radarFrames[index].time * 1000);
-            timeDisplay.textContent = frameTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        
+        if (currentOverlayMode === 'radar') {
+            if (!radarLayers.length) return;
+            radarLayers[index].setOpacity(0.7); // 0.7 opacity
+            if (timeDisplay && radarFrames[index]) {
+                const frameTime = new Date(radarFrames[index].time * 1000);
+                timeDisplay.textContent = frameTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            }
+        } else if (currentOverlayMode === 'clouds') {
+            if (!cloudLayers.length) return;
+            cloudLayers[index].setOpacity(0.65); // 0.65 opacity for satellite IR clouds
+            if (timeDisplay && cloudFrames[index]) {
+                const frameTime = new Date(cloudFrames[index].time * 1000);
+                timeDisplay.textContent = frameTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            }
+        } else if (currentOverlayMode === 'vapor') {
+            if (vaporLayer) vaporLayer.setOpacity(0.65);
+            if (timeDisplay) {
+                timeDisplay.textContent = 'Real-time GOES-East';
+            }
         }
     },
 
     startAnimation() {
-        if (!radarLayers.length) return;
+        const layersToAnimate = currentOverlayMode === 'clouds' ? cloudLayers : radarLayers;
+        if (!layersToAnimate.length) return;
         
         isPlaying = true;
         const playBtn = document.getElementById('toggle-play');
@@ -153,7 +248,7 @@ const MapService = {
 
         animationTimer = setInterval(() => {
             currentFrameIndex++;
-            if (currentFrameIndex >= radarLayers.length) {
+            if (currentFrameIndex >= layersToAnimate.length) {
                 currentFrameIndex = 0; // loop back
             }
             this.showFrame(currentFrameIndex);
