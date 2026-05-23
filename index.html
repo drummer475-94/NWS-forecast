@@ -17,7 +17,15 @@
     <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
+    <!-- Ambient Weather Particle Background Canvas -->
+    <canvas id="weather-ambient-canvas"></canvas>
+
     <div class="app-container">
+        <!-- Severe Weather Alert Banner -->
+        <div id="alerts-banner" class="alerts-banner hidden">
+            <span id="alerts-banner-content"></span>
+        </div>
+
         <!-- Header & Search -->
         <header class="glass-panel">
             <div class="logo">
@@ -25,11 +33,12 @@
                 <h1>NWS Weather</h1>
             </div>
             <div class="search-container">
-                <form id="search-form">
-                    <input type="text" id="search-input" placeholder="Search city or zip code...">
+                <form id="search-form" autocomplete="off">
+                    <input type="text" id="search-input" placeholder="Search city or zip code..." autocomplete="off">
                     <button type="submit" id="search-btn"><i data-lucide="search"></i></button>
                     <button type="button" id="geo-btn" title="Use My Location"><i data-lucide="navigation"></i></button>
                 </form>
+                <div id="search-suggestions" class="suggestions-list hidden"></div>
                 <div id="search-error" class="error-msg hidden"></div>
             </div>
         </header>
@@ -92,22 +101,45 @@
                             <h2>Live Radar</h2>
                             <span id="radar-time" class="radar-time">Loading...</span>
                         </div>
-                        <div class="radar-controls">
-                            <div class="btn-group">
-                                <button type="button" id="toggle-map" class="toggle-btn active">Map</button>
-                                <button type="button" id="toggle-sat" class="toggle-btn">Sat</button>
+                    </div>
+                    <div class="map-wrapper">
+                        <div id="radar-map" class="map-container"></div>
+                        
+                        <!-- Floating Glass Control Panel -->
+                        <div class="radar-controls-floating">
+                            <div class="btn-group overlay-modes">
+                                <button type="button" id="toggle-radar" class="toggle-btn active" title="Show Radar Reflectivity">Radar</button>
+                                <button type="button" id="toggle-clouds" class="toggle-btn" title="Show Satellite Cloud View">Clouds</button>
+                                <button type="button" id="toggle-vapor" class="toggle-btn" title="Show Water Vapor Map">Vapor</button>
                             </div>
-                            <div class="btn-group">
-                                <button type="button" id="toggle-radar" class="toggle-btn active">Radar</button>
-                                <button type="button" id="toggle-clouds" class="toggle-btn">Clouds</button>
-                                <button type="button" id="toggle-vapor" class="toggle-btn">Vapor</button>
+                            <button type="button" id="toggle-play" class="toggle-btn play-btn" title="Play/Pause Animation">
+                                <i data-lucide="play"></i>
+                            </button>
+                        </div>
+
+                        <!-- Floating Map Legend -->
+                        <div id="radar-legend" class="radar-legend-overlay">
+                            <div class="legend-title" id="legend-title">Radar (dBZ)</div>
+                            <div class="legend-bar-container">
+                                <div class="legend-bar" id="legend-gradient"></div>
+                                <div class="legend-labels" id="legend-labels">
+                                    <span>Light</span>
+                                    <span>Moderate</span>
+                                    <span>Heavy</span>
+                                </div>
                             </div>
-                            <button type="button" id="toggle-play" class="toggle-btn" title="Play/Pause"><i data-lucide="play"></i></button>
                         </div>
                     </div>
-                    <div id="radar-map" class="map-container"></div>
                 </section>
             </div>
+
+            <!-- Middle Row: Hourly Forecast -->
+            <section class="glass-panel forecast-card hidden" id="hourly-section">
+                <h2>Hourly Forecast</h2>
+                <div class="hourly-container" id="hourly-container">
+                    <!-- Hourly items injected via JS -->
+                </div>
+            </section>
 
             <!-- Bottom Row: 7-Day Forecast -->
             <section class="glass-panel forecast-card hidden" id="forecast-section">
@@ -119,6 +151,24 @@
         </main>
     </div>
 
+    <!-- Weather Alert Modal -->
+    <div id="alert-modal" class="modal hidden">
+        <div class="modal-content glass-panel">
+            <div class="modal-header">
+                <h3 id="modal-alert-title">Severe Weather Alert</h3>
+                <button type="button" id="close-modal-btn" class="close-btn" title="Close Details">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="alert-meta">
+                    <span id="modal-alert-severity" class="alert-tag"></span>
+                    <span id="modal-alert-urgency" class="alert-tag"></span>
+                </div>
+                <div id="modal-alert-instruction" class="alert-instruction"></div>
+                <div id="modal-alert-desc" class="alert-desc-text"></div>
+            </div>
+        </div>
+    </div>
+
     <!-- Leaflet JS -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     
@@ -126,9 +176,9 @@
     <script src="https://unpkg.com/lucide@latest"></script>
     
     <!-- Application JS -->
-    <script src="js/api.js?v=1.1"></script>
-    <script src="js/map.js?v=1.1"></script>
-    <script src="js/ui.js?v=1.1"></script>
-    <script src="js/app.js?v=1.1"></script>
+    <script src="js/api.js?v=1.2"></script>
+    <script src="js/map.js?v=1.2"></script>
+    <script src="js/ui.js?v=1.2"></script>
+    <script src="js/app.js?v=1.2"></script>
 </body>
 </html>

@@ -1,6 +1,5 @@
 let mapInstance = null;
 let baseMapLayer = null;
-let satMapLayer = null;
 let currentBaseLayer = null;
 
 // RainViewer & Satellite Animation State
@@ -18,19 +17,20 @@ let isPlaying = false;
 const MapService = {
     initMap(lat, lon) {
         if (!mapInstance) {
-            // Initialize map
-            mapInstance = L.map('radar-map').setView([lat, lon], 7);
+            // Initialize map with custom clean controls
+            mapInstance = L.map('radar-map', {
+                zoomControl: false
+            }).setView([lat, lon], 7);
 
-            // Light Map (CartoDB Positron)
-            baseMapLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+            // Add clean custom-positioned zoom control at bottom-right
+            L.control.zoom({
+                position: 'bottomright'
+            }).addTo(mapInstance);
+
+            // Sleek CartoDB Dark Matter Base Map layer
+            baseMapLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
                 attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
                 subdomains: 'abcd',
-                maxZoom: 20
-            });
-
-            // Satellite Map (ESRI World Imagery)
-            satMapLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-                attribution: 'Tiles &copy; Esri',
                 maxZoom: 20
             });
 
@@ -44,6 +44,9 @@ const MapService = {
             // Bind UI toggles
             this.bindToggles();
             
+            // Update Legend UI on init
+            this.updateLegendUI();
+
             // Fetch and setup RainViewer animation
             this.setupRainViewer();
         } else {
@@ -52,36 +55,7 @@ const MapService = {
     },
 
     bindToggles() {
-        const mapBtn = document.getElementById('toggle-map');
-        const satBtn = document.getElementById('toggle-sat');
         const playBtn = document.getElementById('toggle-play');
-
-        // Base Map Toggles
-        if (mapBtn && satBtn) {
-            mapBtn.addEventListener('click', () => {
-                if (currentBaseLayer !== baseMapLayer) {
-                    mapInstance.removeLayer(currentBaseLayer);
-                    currentBaseLayer = baseMapLayer;
-                    currentBaseLayer.addTo(mapInstance);
-                    // Ensure radar stays on top
-                    radarLayers.forEach(l => l.bringToFront());
-                    mapBtn.classList.add('active');
-                    satBtn.classList.remove('active');
-                }
-            });
-
-            satBtn.addEventListener('click', () => {
-                if (currentBaseLayer !== satMapLayer) {
-                    mapInstance.removeLayer(currentBaseLayer);
-                    currentBaseLayer = satMapLayer;
-                    currentBaseLayer.addTo(mapInstance);
-                    // Ensure radar stays on top
-                    radarLayers.forEach(l => l.bringToFront());
-                    satBtn.classList.add('active');
-                    mapBtn.classList.remove('active');
-                }
-            });
-        }
 
         // Animation Toggle
         if (playBtn) {
@@ -106,6 +80,7 @@ const MapService = {
                 cloudsBtn.classList.remove('active');
                 vaporBtn.classList.remove('active');
                 this.updatePlayButtonState();
+                this.updateLegendUI();
                 this.showFrame(currentFrameIndex);
             });
             
@@ -115,6 +90,7 @@ const MapService = {
                 radarBtn.classList.remove('active');
                 vaporBtn.classList.remove('active');
                 this.updatePlayButtonState();
+                this.updateLegendUI();
                 this.showFrame(currentFrameIndex);
             });
             
@@ -124,8 +100,30 @@ const MapService = {
                 radarBtn.classList.remove('active');
                 cloudsBtn.classList.remove('active');
                 this.updatePlayButtonState();
+                this.updateLegendUI();
                 this.showFrame(currentFrameIndex);
             });
+        }
+    },
+
+    updateLegendUI() {
+        const titleEl = document.getElementById('legend-title');
+        const gradEl = document.getElementById('legend-gradient');
+        const labelsEl = document.getElementById('legend-labels');
+        if (!titleEl || !gradEl || !labelsEl) return;
+
+        if (currentOverlayMode === 'radar') {
+            titleEl.textContent = 'Radar (dBZ)';
+            gradEl.style.background = 'linear-gradient(to right, rgba(0,236,236,0.3) 0%, rgba(1,160,246,0.6) 20%, rgba(0,229,0,0.8) 40%, rgba(253,253,0,0.9) 60%, rgba(253,0,0,0.9) 80%, rgba(148,0,211,1) 100%)';
+            labelsEl.innerHTML = '<span>Light</span><span>Moderate</span><span>Heavy</span>';
+        } else if (currentOverlayMode === 'clouds') {
+            titleEl.textContent = 'Clouds (Infrared)';
+            gradEl.style.background = 'linear-gradient(to right, rgba(0,0,0,0.1) 0%, rgba(80,80,80,0.5) 30%, rgba(180,180,180,0.8) 60%, rgba(255,255,255,0.9) 80%, rgba(0,200,255,0.9) 100%)';
+            labelsEl.innerHTML = '<span>Warm / Low</span><span>Cold / High</span>';
+        } else if (currentOverlayMode === 'vapor') {
+            titleEl.textContent = 'Water Vapor (GOES)';
+            gradEl.style.background = 'linear-gradient(to right, rgba(64,0,64,0.7) 0%, rgba(0,0,255,0.7) 30%, rgba(0,255,255,0.7) 60%, rgba(255,255,255,0.7) 80%, rgba(255,255,0,0.7) 100%)';
+            labelsEl.innerHTML = '<span>Dry (Sinking)</span><span>Moist (Rising)</span>';
         }
     },
 
@@ -135,7 +133,7 @@ const MapService = {
         
         if (currentOverlayMode === 'vapor') {
             playBtn.setAttribute('disabled', 'true');
-            playBtn.style.opacity = '0.5';
+            playBtn.style.opacity = '0.4';
             playBtn.style.cursor = 'not-allowed';
             this.stopAnimation();
         } else {
@@ -163,7 +161,7 @@ const MapService = {
             radarLayers = radarFrames.map((frame, index) => {
                 const layer = L.tileLayer(`https://tilecache.rainviewer.com${frame.path}/256/{z}/{x}/{y}/2/1_1.png`, {
                     opacity: 0,
-                    zIndex: 10 + index, // ensure they sit on top of base map
+                    zIndex: 10 + index,
                     transparent: true,
                     maxNativeZoom: 7
                 });
@@ -214,14 +212,14 @@ const MapService = {
         
         if (currentOverlayMode === 'radar') {
             if (!radarLayers.length) return;
-            radarLayers[index].setOpacity(0.7); // 0.7 opacity
+            radarLayers[index].setOpacity(0.7);
             if (timeDisplay && radarFrames[index]) {
                 const frameTime = new Date(radarFrames[index].time * 1000);
                 timeDisplay.textContent = frameTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             }
         } else if (currentOverlayMode === 'clouds') {
             if (!cloudLayers.length) return;
-            cloudLayers[index].setOpacity(0.65); // 0.65 opacity for satellite IR clouds
+            cloudLayers[index].setOpacity(0.65);
             if (timeDisplay && cloudFrames[index]) {
                 const frameTime = new Date(cloudFrames[index].time * 1000);
                 timeDisplay.textContent = frameTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -249,10 +247,10 @@ const MapService = {
         animationTimer = setInterval(() => {
             currentFrameIndex++;
             if (currentFrameIndex >= layersToAnimate.length) {
-                currentFrameIndex = 0; // loop back
+                currentFrameIndex = 0;
             }
             this.showFrame(currentFrameIndex);
-        }, 800); // 800ms per frame
+        }, 800);
     },
 
     stopAnimation() {

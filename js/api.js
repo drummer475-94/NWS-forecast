@@ -1,7 +1,5 @@
 const API = {
     // 1. Geocoding using Nominatim (OpenStreetMap)
-    // Note: Nominatim requires a user-agent or a clear contact in headers/query to avoid blocking.
-    // For browser fetch, it's best to pass an 'email' param or just use standard params.
     async geocode(query) {
         try {
             const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`);
@@ -11,7 +9,7 @@ const API = {
                 return {
                     lat: parseFloat(data[0].lat),
                     lon: parseFloat(data[0].lon),
-                    name: data[0].display_name.split(',')[0] // Get first part of name
+                    name: data[0].display_name.split(',')[0]
                 };
             }
             throw new Error('Location not found');
@@ -28,7 +26,6 @@ const API = {
             if (!res.ok) throw new Error('Reverse geocoding failed');
             const data = await res.json();
             
-            // Extract the most sensible city/town/village name
             const address = data.address || {};
             const city = address.city || address.town || address.village || address.hamlet || address.county || 'Unknown Location';
             return {
@@ -38,12 +35,43 @@ const API = {
             };
         } catch (error) {
             console.error('Reverse Geocode Error:', error);
-            // Fallback
             return { lat, lon, name: `${lat.toFixed(2)}, ${lon.toFixed(2)}` };
         }
     },
 
-    // 3. Get NWS Grid Points
+    // 3. Search Autocomplete suggestions (Nominatim)
+    async getSuggestions(query) {
+        try {
+            const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&addressdetails=1&limit=5`);
+            if (!res.ok) throw new Error('Autocomplete failed');
+            const data = await res.json();
+            if (data && data.length > 0) {
+                return data.map(item => {
+                    const address = item.address || {};
+                    const city = address.city || address.town || address.village || address.hamlet || address.municipality || item.display_name.split(',')[0];
+                    const state = address.state || address.region || '';
+                    const country = address.country || '';
+                    
+                    let label = city;
+                    if (state) label += `, ${state}`;
+                    else if (country) label += `, ${country}`;
+                    
+                    return {
+                        lat: parseFloat(item.lat),
+                        lon: parseFloat(item.lon),
+                        label: label,
+                        displayName: item.display_name
+                    };
+                });
+            }
+            return [];
+        } catch (error) {
+            console.error('Autocomplete Error:', error);
+            return [];
+        }
+    },
+
+    // 4. Get NWS Grid Points
     async getNWSPoints(lat, lon) {
         try {
             const res = await fetch(`https://api.weather.gov/points/${lat},${lon}`);
@@ -58,7 +86,7 @@ const API = {
         }
     },
 
-    // 4. Get NWS Forecast
+    // 5. Get NWS Forecast
     async getForecast(forecastUrl) {
         try {
             const res = await fetch(forecastUrl);
@@ -67,6 +95,18 @@ const API = {
         } catch (error) {
             console.error('NWS Forecast Error:', error);
             throw error;
+        }
+    },
+
+    // 6. Get NWS Alerts
+    async getAlerts(lat, lon) {
+        try {
+            const res = await fetch(`https://api.weather.gov/alerts/active?point=${lat},${lon}`);
+            if (!res.ok) throw new Error('Failed to fetch alerts');
+            return await res.json();
+        } catch (error) {
+            console.error('NWS Alerts Error:', error);
+            return null; // non-critical failure
         }
     }
 };
