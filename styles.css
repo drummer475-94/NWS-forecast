@@ -143,15 +143,25 @@ h2 {
   font-size: 0.82rem;
 }
 
-.source-pill {
+.source-pill,
+.radar-source-pill {
   flex: 0 0 auto;
-  border: 1px solid rgba(34, 197, 94, 0.45);
   border-radius: 999px;
   padding: 7px 10px;
-  background: rgba(34, 197, 94, 0.14);
-  color: #bbf7d0;
   font-size: 0.78rem;
   font-weight: 800;
+}
+
+.source-pill {
+  border: 1px solid rgba(34, 197, 94, 0.45);
+  background: rgba(34, 197, 94, 0.14);
+  color: #bbf7d0;
+}
+
+.radar-source-pill {
+  border: 1px solid rgba(56, 189, 248, 0.5);
+  background: rgba(56, 189, 248, 0.14);
+  color: #bae6fd;
 }
 
 .current-grid {
@@ -425,6 +435,10 @@ h2 {
   margin-bottom: 10px;
 }
 
+.radar-statusbar {
+  justify-content: space-between;
+}
+
 .map-toolbar {
   display: flex;
   align-items: center;
@@ -470,6 +484,14 @@ h2 {
 .leaflet-container {
   background: #0f172a;
   font: inherit;
+}
+
+.radar-map .leaflet-layer {
+  transition: opacity 180ms linear;
+}
+
+.rainviewer-tile {
+  will-change: opacity;
 }
 
 .leaflet-control-zoom a {
@@ -578,7 +600,8 @@ h2 {
     align-items: flex-start;
   }
 
-  .source-pill {
+  .source-pill,
+  .radar-source-pill {
     padding-inline: 8px;
   }
 
@@ -592,8 +615,16 @@ h2 {
     flex-wrap: wrap;
   }
 
+  .radar-statusbar {
+    flex-wrap: nowrap;
+  }
+
   .locate-map {
     flex: 1 1 100%;
+  }
+
+  .radar-statusbar .locate-map {
+    flex: 0 0 auto;
   }
 
   .zoom-button {
