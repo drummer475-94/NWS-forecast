@@ -5,8 +5,8 @@ const NWS_HEADERS = {
 const MAP_MAX_ZOOM = 18;
 const RAINVIEWER_NATIVE_ZOOM = 10;
 const RAINVIEWER_FRAME_LIMIT = 14;
-const RAINVIEWER_FRAME_MS = 650;
-const RAINVIEWER_OPACITY = 0.72;
+const RAINVIEWER_FRAME_MS = 575;
+const RAINVIEWER_OPACITY = 0.76;
 
 const state = {
   lat: null,
@@ -25,7 +25,9 @@ const state = {
   rainviewerFrames: [],
   rainviewerFrameIndex: 0,
   rainviewerHd: true,
-  radarAnimationTimer: 0,
+  radarAnimationFrame: 0,
+  radarNextFrameAt: 0,
+  radarPreloadFrame: 0,
   activeBaseMap: "street"
 };
 
@@ -50,6 +52,7 @@ const el = {
   alertsCount: document.querySelector("#alertsCount"),
   alertsList: document.querySelector("#alertsList"),
   radarTimestamp: document.querySelector("#radarTimestamp"),
+  radarProgress: document.querySelector("#radarProgress"),
   radarPlayButton: document.querySelector("#radarPlayButton"),
   radarHdButton: document.querySelector("#radarHdButton"),
   zoomOutButton: document.querySelector("#zoomOutButton"),
@@ -350,14 +353,18 @@ function initMap(lat, lon, zoom) {
     minZoom: 2,
     maxZoom: MAP_MAX_ZOOM,
     zoomSnap: 0.25,
-    zoomDelta: 0.5
+    zoomDelta: 0.5,
+    fadeAnimation: true,
+    markerZoomAnimation: true,
+    inertia: true,
+    wheelDebounceTime: 40
   }).setView([lat, lon], zoom);
 
   state.streetLayer = L.tileLayer("https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}", {
     maxZoom: MAP_MAX_ZOOM,
     maxNativeZoom: 16,
     updateWhenIdle: true,
-    keepBuffer: 3,
+    keepBuffer: 4,
     attribution: "USGS Topo"
   }).addTo(state.map);
 
@@ -365,7 +372,7 @@ function initMap(lat, lon, zoom) {
     maxZoom: MAP_MAX_ZOOM,
     maxNativeZoom: 16,
     updateWhenIdle: true,
-    keepBuffer: 3,
+    keepBuffer: 4,
     attribution: "USGS Imagery"
   });
 
@@ -379,7 +386,7 @@ function initMap(lat, lon, zoom) {
 }
 
 async function loadRainViewerLayer() {
-  const shouldResumeAnimation = Boolean(state.radarAnimationTimer);
+  const shouldResumeAnimation = isRadarAnimating();
   if (shouldResumeAnimation) {
     stopRadarAnimation();
   }
@@ -401,6 +408,7 @@ async function loadRainViewerLayer() {
   } catch (error) {
     console.error(error);
     resetRainViewerLayers();
+    updateRadarProgress();
     el.radarTimestamp.textContent = "RainViewer unavailable";
     showToast("RainViewer radar is temporarily unavailable.");
   }
@@ -414,6 +422,11 @@ function getRainViewerFrames(data) {
 }
 
 function resetRainViewerLayers() {
+  if (state.radarPreloadFrame) {
+    window.cancelAnimationFrame(state.radarPreloadFrame);
+    state.radarPreloadFrame = 0;
+  }
+
   for (const layer of state.rainviewerLayers.values()) {
     if (state.map.hasLayer(layer)) {
       state.map.removeLayer(layer);
@@ -437,6 +450,7 @@ function renderRainViewerFrame(index) {
 
   state.rainviewerLayer = nextLayer;
   bringRadarForward();
+  updateRadarProgress();
 
   const frame = state.rainviewerFrames[state.rainviewerFrameIndex];
   el.radarTimestamp.textContent = `Radar ${formatUnix(frame.time)}${state.rainviewerHd ? " HD" : ""}`;
@@ -462,7 +476,8 @@ function ensureRainViewerLayer(index) {
     opacity: 0,
     updateWhenIdle: true,
     updateWhenZooming: false,
-    keepBuffer: 3,
+    updateInterval: 120,
+    keepBuffer: 4,
     className: "rainviewer-tile",
     attribution: state.rainviewerHd ? "RainViewer HD" : "RainViewer"
   });
@@ -475,18 +490,36 @@ function ensureRainViewerLayer(index) {
 
 function preloadRainViewerFrames(activeIndex) {
   const frameCount = state.rainviewerFrames.length;
-  if (!frameCount) return;
+  if (!frameCount || state.radarPreloadFrame) return;
 
-  window.requestAnimationFrame(() => {
-    for (let offset = 1; offset < frameCount; offset += 1) {
+  let offset = 1;
+  const preloadBatch = () => {
+    let created = 0;
+    while (offset < frameCount && created < 2) {
       ensureRainViewerLayer((activeIndex + offset) % frameCount);
+      offset += 1;
+      created += 1;
     }
+
     bringRadarForward();
-  });
+    if (offset < frameCount) {
+      state.radarPreloadFrame = window.requestAnimationFrame(preloadBatch);
+    } else {
+      state.radarPreloadFrame = 0;
+    }
+  };
+
+  state.radarPreloadFrame = window.requestAnimationFrame(preloadBatch);
+}
+
+function updateRadarProgress() {
+  const frameCount = state.rainviewerFrames.length;
+  const progress = frameCount ? (state.rainviewerFrameIndex + 1) / frameCount : 0;
+  el.radarProgress.style.transform = `scaleX(${progress})`;
 }
 
 function toggleRadarAnimation() {
-  if (state.radarAnimationTimer) {
+  if (isRadarAnimating()) {
     stopRadarAnimation();
     return;
   }
@@ -494,7 +527,7 @@ function toggleRadarAnimation() {
 }
 
 function startRadarAnimation() {
-  if (state.radarAnimationTimer) return;
+  if (isRadarAnimating()) return;
   if (state.rainviewerFrames.length < 2) {
     showToast("Radar animation is not available yet.");
     return;
@@ -503,21 +536,37 @@ function startRadarAnimation() {
   preloadRainViewerFrames(state.rainviewerFrameIndex);
   el.radarPlayButton.textContent = "Pause";
   el.radarPlayButton.classList.add("active");
-  state.radarAnimationTimer = window.setInterval(() => {
-    renderRainViewerFrame(state.rainviewerFrameIndex + 1);
-  }, RAINVIEWER_FRAME_MS);
+  state.radarNextFrameAt = performance.now() + RAINVIEWER_FRAME_MS;
+  state.radarAnimationFrame = window.requestAnimationFrame(runRadarAnimation);
+}
+
+function runRadarAnimation(now) {
+  if (!isRadarAnimating()) return;
+
+  if (now >= state.radarNextFrameAt) {
+    const skippedFrames = Math.floor((now - state.radarNextFrameAt) / RAINVIEWER_FRAME_MS);
+    renderRainViewerFrame(state.rainviewerFrameIndex + skippedFrames + 1);
+    state.radarNextFrameAt += (skippedFrames + 1) * RAINVIEWER_FRAME_MS;
+  }
+
+  state.radarAnimationFrame = window.requestAnimationFrame(runRadarAnimation);
 }
 
 function stopRadarAnimation() {
-  if (!state.radarAnimationTimer) return;
-  window.clearInterval(state.radarAnimationTimer);
-  state.radarAnimationTimer = 0;
+  if (!isRadarAnimating()) return;
+  window.cancelAnimationFrame(state.radarAnimationFrame);
+  state.radarAnimationFrame = 0;
+  state.radarNextFrameAt = 0;
   el.radarPlayButton.textContent = "Play";
   el.radarPlayButton.classList.remove("active");
 }
 
+function isRadarAnimating() {
+  return Boolean(state.radarAnimationFrame);
+}
+
 function toggleRadarHd() {
-  const shouldResumeAnimation = Boolean(state.radarAnimationTimer);
+  const shouldResumeAnimation = isRadarAnimating();
   if (shouldResumeAnimation) {
     stopRadarAnimation();
   }
