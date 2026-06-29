@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="theme-color" content="#0f172a">
+    <meta name="theme-color" content="#090d12">
     <title>NWS Local Weather</title>
     <link rel="preconnect" href="https://api.weather.gov">
     <link rel="preconnect" href="https://api.rainviewer.com">
@@ -125,6 +125,9 @@
             <button class="segmented" id="satelliteMapButton" type="button">Satellite</button>
           </div>
 
+          <div class="radar-timeline" aria-hidden="true">
+            <span id="radarProgress"></span>
+          </div>
           <div id="radarMap" class="radar-map" aria-label="Interactive RainViewer radar map"></div>
           <p class="attribution">
             Forecasts from the National Weather Service. Basemaps from USGS. ZIP lookup from
