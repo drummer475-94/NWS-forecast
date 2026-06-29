@@ -1,16 +1,23 @@
 :root {
   color-scheme: dark;
-  --bg: #171a1f;
-  --panel: #242a31;
-  --panel-strong: #2f3a44;
-  --ink: #f8fafc;
-  --muted: #aeb8c8;
-  --line: rgba(255, 255, 255, 0.12);
-  --accent: #22c55e;
-  --accent-dark: #15803d;
+  --bg: #090d12;
+  --bg-soft: #10161d;
+  --panel: rgba(19, 28, 37, 0.92);
+  --panel-strong: rgba(25, 38, 49, 0.96);
+  --panel-raised: rgba(30, 43, 55, 0.92);
+  --ink: #f7fbff;
+  --muted: #a8b6c7;
+  --quiet: #76869a;
+  --line: rgba(180, 205, 230, 0.16);
+  --line-strong: rgba(210, 230, 245, 0.24);
+  --accent: #4ade80;
+  --accent-dark: #16a34a;
+  --cyan: #38bdf8;
+  --cyan-soft: rgba(56, 189, 248, 0.16);
   --warning: #f59e0b;
-  --water: #38bdf8;
-  --shadow: 0 18px 45px rgba(0, 0, 0, 0.28);
+  --danger: #fb7185;
+  --shadow: 0 22px 55px rgba(0, 0, 0, 0.34);
+  --shadow-soft: 0 14px 32px rgba(0, 0, 0, 0.22);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
@@ -23,8 +30,9 @@ body {
   margin: 0;
   min-height: 100%;
   background:
-    radial-gradient(circle at top left, rgba(34, 197, 94, 0.14), transparent 30rem),
-    linear-gradient(180deg, #12151a 0%, var(--bg) 44%, #15191f 100%);
+    linear-gradient(135deg, rgba(56, 189, 248, 0.09) 0%, transparent 32%),
+    linear-gradient(205deg, rgba(74, 222, 128, 0.08) 0%, transparent 38%),
+    linear-gradient(180deg, #070a0f 0%, var(--bg) 48%, #0e141b 100%);
   color: var(--ink);
 }
 
@@ -43,10 +51,16 @@ button {
   touch-action: manipulation;
 }
 
+button:focus-visible,
+input:focus-visible {
+  outline: 3px solid rgba(56, 189, 248, 0.45);
+  outline-offset: 2px;
+}
+
 .app-shell {
   width: min(1120px, 100%);
   margin: 0 auto;
-  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(28px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  padding: max(18px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(30px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
 }
 
 .topbar {
@@ -54,7 +68,7 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 6px 0 18px;
+  padding: 8px 0 18px;
 }
 
 .eyebrow,
@@ -66,9 +80,9 @@ button {
 }
 
 .eyebrow {
-  margin: 0 0 4px;
+  margin: 0 0 5px;
   font-size: 0.72rem;
-  font-weight: 800;
+  font-weight: 850;
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -80,22 +94,41 @@ p {
 }
 
 h1 {
-  font-size: 3.7rem;
+  color: #ffffff;
+  font-size: 3.65rem;
   line-height: 0.96;
+  text-shadow: 0 10px 32px rgba(56, 189, 248, 0.16);
 }
 
 h2 {
-  font-size: 1.1rem;
+  color: #ffffff;
+  font-size: 1.08rem;
 }
 
 .icon-button,
 .locate-map,
 .zoom-button {
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.07);
   color: var(--ink);
   cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.icon-button:hover,
+.locate-map:hover,
+.zoom-button:hover,
+.segmented:hover {
+  border-color: rgba(56, 189, 248, 0.44);
+  background: rgba(255, 255, 255, 0.11);
+}
+
+.icon-button:active,
+.locate-map:active,
+.zoom-button:active,
+.segmented:active {
+  transform: translateY(1px);
 }
 
 .icon-button {
@@ -112,12 +145,17 @@ h2 {
 .alerts-panel {
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(31, 41, 55, 0.88);
-  box-shadow: var(--shadow);
+  background: var(--panel);
+  box-shadow: var(--shadow-soft);
+  backdrop-filter: blur(18px);
 }
 
 .hero-panel {
-  padding: 18px;
+  padding: 20px;
+  background:
+    linear-gradient(135deg, rgba(56, 189, 248, 0.11), transparent 46%),
+    linear-gradient(180deg, rgba(28, 42, 54, 0.94), rgba(16, 23, 32, 0.94));
+  box-shadow: var(--shadow);
 }
 
 .status-row,
@@ -149,19 +187,19 @@ h2 {
   border-radius: 999px;
   padding: 7px 10px;
   font-size: 0.78rem;
-  font-weight: 800;
+  font-weight: 850;
 }
 
 .source-pill {
-  border: 1px solid rgba(34, 197, 94, 0.45);
-  background: rgba(34, 197, 94, 0.14);
-  color: #bbf7d0;
+  border: 1px solid rgba(74, 222, 128, 0.46);
+  background: rgba(74, 222, 128, 0.14);
+  color: #c9fdd8;
 }
 
 .radar-source-pill {
-  border: 1px solid rgba(56, 189, 248, 0.5);
-  background: rgba(56, 189, 248, 0.14);
-  color: #bae6fd;
+  border: 1px solid rgba(56, 189, 248, 0.52);
+  background: var(--cyan-soft);
+  color: #d7f2ff;
 }
 
 .current-grid {
@@ -175,6 +213,7 @@ h2 {
 .current-temp {
   display: flex;
   align-items: flex-start;
+  color: #ffffff;
   font-size: 8rem;
   font-weight: 850;
   line-height: 0.78;
@@ -182,6 +221,7 @@ h2 {
 
 .degree {
   margin-top: 0.16em;
+  color: var(--cyan);
   font-size: 0.35em;
 }
 
@@ -191,6 +231,7 @@ h2 {
 
 #currentSummary {
   margin-bottom: 16px;
+  color: #ffffff;
   font-size: 2rem;
   font-weight: 780;
   line-height: 1.08;
@@ -206,18 +247,19 @@ h2 {
   flex: 1 1 92px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 10px;
+  padding: 11px;
   background: rgba(255, 255, 255, 0.06);
 }
 
 .metric-label {
   display: block;
-  margin-bottom: 4px;
+  margin-bottom: 5px;
   font-size: 0.74rem;
 }
 
 .metric-row strong {
-  font-size: 1rem;
+  color: #ffffff;
+  font-size: 1.03rem;
 }
 
 .location-forms {
@@ -236,7 +278,7 @@ h2 {
   margin-bottom: 8px;
   color: var(--muted);
   font-size: 0.82rem;
-  font-weight: 700;
+  font-weight: 750;
 }
 
 .input-row {
@@ -251,15 +293,19 @@ h2 {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 0 12px;
-  background: #15191f;
+  background: rgba(5, 10, 16, 0.68);
   color: var(--ink);
+}
+
+.input-row input::placeholder {
+  color: var(--quiet);
 }
 
 .input-row button,
 .segmented.active {
   border: 0;
   border-radius: 8px;
-  background: var(--accent);
+  background: linear-gradient(180deg, #66e98f, var(--accent));
   color: #052e16;
   font-weight: 850;
 }
@@ -276,8 +322,8 @@ h2 {
 .alerts-panel {
   margin-top: 16px;
   padding: 16px;
-  border-color: rgba(245, 158, 11, 0.35);
-  background: rgba(57, 42, 24, 0.86);
+  border-color: rgba(245, 158, 11, 0.38);
+  background: rgba(52, 38, 20, 0.9);
 }
 
 .alerts-list {
@@ -291,18 +337,19 @@ h2 {
   gap: 12px;
   align-items: center;
   min-height: 76px;
-  border: 1px solid rgba(245, 158, 11, 0.34);
+  border: 1px solid rgba(245, 158, 11, 0.38);
   border-radius: 8px;
   padding: 12px;
-  background: rgba(245, 158, 11, 0.13);
+  background: rgba(245, 158, 11, 0.14);
 }
 
 .alert-card-hot {
-  border-color: rgba(248, 113, 113, 0.48);
-  background: rgba(127, 29, 29, 0.28);
+  border-color: rgba(251, 113, 133, 0.55);
+  background: rgba(127, 29, 29, 0.34);
 }
 
 .alert-title {
+  color: #fff7ed;
   font-weight: 850;
 }
 
@@ -333,21 +380,22 @@ h2 {
 
 .hourly-scroll {
   display: grid;
-  grid-auto-columns: minmax(90px, 1fr);
+  grid-auto-columns: minmax(96px, 1fr);
   grid-auto-flow: column;
   gap: 10px;
   min-height: 150px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scroll-snap-type: x proximity;
-  padding-bottom: 4px;
+  padding-bottom: 6px;
+  scrollbar-color: rgba(56, 189, 248, 0.42) rgba(255, 255, 255, 0.08);
 }
 
 .hour-card,
 .day-card {
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.055);
 }
 
 .hour-card {
@@ -358,8 +406,9 @@ h2 {
 
 .hour-time,
 .day-name {
+  color: #ffffff;
   font-size: 0.82rem;
-  font-weight: 800;
+  font-weight: 850;
 }
 
 .hour-icon {
@@ -367,9 +416,11 @@ h2 {
   height: 48px;
   margin: 10px 0;
   border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .hour-temp {
+  color: #ffffff;
   font-size: 1.45rem;
   font-weight: 850;
 }
@@ -398,6 +449,7 @@ h2 {
   width: 52px;
   height: 52px;
   border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .day-summary {
@@ -412,7 +464,7 @@ h2 {
   margin-top: 6px;
   border-radius: 8px;
   padding: 5px 8px;
-  background: rgba(245, 158, 11, 0.18);
+  background: rgba(245, 158, 11, 0.2);
   color: #fde68a;
   font-size: 0.78rem;
   font-weight: 850;
@@ -420,6 +472,7 @@ h2 {
 
 .day-temp {
   min-width: 58px;
+  color: #ffffff;
   text-align: right;
   font-size: 1.35rem;
   font-weight: 850;
@@ -427,6 +480,10 @@ h2 {
 
 .radar-block {
   overflow: hidden;
+  border-color: rgba(56, 189, 248, 0.25);
+  background:
+    linear-gradient(180deg, rgba(22, 37, 49, 0.96), rgba(10, 16, 24, 0.96));
+  box-shadow: var(--shadow);
 }
 
 .radar-toolbar,
@@ -453,9 +510,10 @@ h2 {
   flex: 1 1 0;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.065);
   color: var(--ink);
   cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
 }
 
 .locate-map {
@@ -471,23 +529,46 @@ h2 {
   line-height: 1;
 }
 
+.radar-timeline {
+  position: relative;
+  height: 5px;
+  margin: 0 0 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.11);
+}
+
+.radar-timeline span {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--cyan), var(--accent));
+  box-shadow: 0 0 18px rgba(56, 189, 248, 0.42);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
 .radar-map {
   width: 100%;
-  height: min(68vh, 540px);
-  min-height: 380px;
-  border: 1px solid var(--line);
+  height: min(68vh, 560px);
+  min-height: 390px;
+  overflow: hidden;
+  border: 1px solid rgba(180, 205, 230, 0.22);
   border-radius: 8px;
-  background: #0f172a;
+  background: #071019;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.035);
   touch-action: pan-x pan-y;
 }
 
 .leaflet-container {
-  background: #0f172a;
+  background: #071019;
   font: inherit;
 }
 
 .radar-map .leaflet-layer {
-  transition: opacity 180ms linear;
+  transition: opacity 220ms linear;
 }
 
 .rainviewer-tile {
@@ -507,7 +588,7 @@ h2 {
 }
 
 .attribution a {
-  color: #7dd3fc;
+  color: #8bddff;
 }
 
 .toast {
@@ -518,10 +599,10 @@ h2 {
   z-index: 1000;
   max-width: 560px;
   margin: 0 auto;
-  border: 1px solid rgba(245, 158, 11, 0.42);
+  border: 1px solid rgba(245, 158, 11, 0.44);
   border-radius: 8px;
   padding: 12px 14px;
-  background: rgba(30, 41, 59, 0.96);
+  background: rgba(13, 20, 29, 0.97);
   color: var(--ink);
   box-shadow: var(--shadow);
   transform: translateY(140%);
@@ -586,7 +667,7 @@ h2 {
 
   .radar-map {
     height: 62vh;
-    min-height: 360px;
+    min-height: 370px;
   }
 }
 
