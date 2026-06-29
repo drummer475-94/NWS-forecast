@@ -2,6 +2,12 @@ const NWS_HEADERS = {
   "Accept": "application/geo+json"
 };
 
+const MAP_MAX_ZOOM = 18;
+const RAINVIEWER_NATIVE_ZOOM = 10;
+const RAINVIEWER_FRAME_LIMIT = 14;
+const RAINVIEWER_FRAME_MS = 650;
+const RAINVIEWER_OPACITY = 0.72;
+
 const state = {
   lat: null,
   lon: null,
@@ -14,14 +20,13 @@ const state = {
   streetLayer: null,
   satelliteLayer: null,
   rainviewerLayer: null,
+  rainviewerLayers: new Map(),
   rainviewerHost: "",
   rainviewerFrames: [],
   rainviewerFrameIndex: 0,
   rainviewerHd: true,
   radarAnimationTimer: 0,
-  nwsLayer: null,
-  activeBaseMap: "street",
-  activeRadar: "rainviewer"
+  activeBaseMap: "street"
 };
 
 const el = {
@@ -45,8 +50,6 @@ const el = {
   alertsCount: document.querySelector("#alertsCount"),
   alertsList: document.querySelector("#alertsList"),
   radarTimestamp: document.querySelector("#radarTimestamp"),
-  rainviewerLayerButton: document.querySelector("#rainviewerLayerButton"),
-  nwsLayerButton: document.querySelector("#nwsLayerButton"),
   radarPlayButton: document.querySelector("#radarPlayButton"),
   radarHdButton: document.querySelector("#radarHdButton"),
   zoomOutButton: document.querySelector("#zoomOutButton"),
@@ -61,8 +64,6 @@ document.addEventListener("DOMContentLoaded", init);
 el.refreshButton.addEventListener("click", () => refreshForecast());
 el.zipLocationForm.addEventListener("submit", handleZipLocation);
 el.manualLocationForm.addEventListener("submit", handleManualLocation);
-el.rainviewerLayerButton.addEventListener("click", () => setRadarSource("rainviewer"));
-el.nwsLayerButton.addEventListener("click", () => setRadarSource("nws"));
 el.radarPlayButton.addEventListener("click", toggleRadarAnimation);
 el.radarHdButton.addEventListener("click", toggleRadarHd);
 el.zoomOutButton.addEventListener("click", () => state.map.zoomOut());
@@ -345,25 +346,27 @@ function initMap(lat, lon, zoom) {
     zoomControl: false,
     tap: true,
     touchZoom: true,
-    scrollWheelZoom: false
+    scrollWheelZoom: false,
+    minZoom: 2,
+    maxZoom: MAP_MAX_ZOOM,
+    zoomSnap: 0.25,
+    zoomDelta: 0.5
   }).setView([lat, lon], zoom);
 
   state.streetLayer = L.tileLayer("https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}", {
-    maxZoom: 16,
+    maxZoom: MAP_MAX_ZOOM,
+    maxNativeZoom: 16,
+    updateWhenIdle: true,
+    keepBuffer: 3,
     attribution: "USGS Topo"
   }).addTo(state.map);
 
   state.satelliteLayer = L.tileLayer("https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}", {
-    maxZoom: 16,
+    maxZoom: MAP_MAX_ZOOM,
+    maxNativeZoom: 16,
+    updateWhenIdle: true,
+    keepBuffer: 3,
     attribution: "USGS Imagery"
-  });
-
-  state.nwsLayer = L.tileLayer.wms("https://opengeo.ncep.noaa.gov/geoserver/conus/conus_bref_qcd/ows", {
-    layers: "conus_bref_qcd",
-    format: "image/png",
-    transparent: true,
-    opacity: 0.72,
-    attribution: "NWS MRMS"
   });
 
   state.marker = L.circleMarker([lat, lon], {
@@ -376,21 +379,30 @@ function initMap(lat, lon, zoom) {
 }
 
 async function loadRainViewerLayer() {
+  const shouldResumeAnimation = Boolean(state.radarAnimationTimer);
+  if (shouldResumeAnimation) {
+    stopRadarAnimation();
+  }
+
   try {
     const data = await fetchJson("https://api.rainviewer.com/public/weather-maps.json", {});
     state.rainviewerHost = data.host;
     state.rainviewerFrames = getRainViewerFrames(data);
     if (!state.rainviewerFrames.length) throw new Error("RainViewer returned no radar frames.");
+
     state.rainviewerFrameIndex = state.rainviewerFrames.length - 1;
-
+    resetRainViewerLayers();
     renderRainViewerFrame(state.rainviewerFrameIndex);
+    preloadRainViewerFrames(state.rainviewerFrameIndex);
 
+    if (shouldResumeAnimation) {
+      startRadarAnimation();
+    }
   } catch (error) {
     console.error(error);
+    resetRainViewerLayers();
     el.radarTimestamp.textContent = "RainViewer unavailable";
-    if (state.activeRadar === "rainviewer") {
-      setRadarSource("nws");
-    }
+    showToast("RainViewer radar is temporarily unavailable.");
   }
 }
 
@@ -398,55 +410,102 @@ function getRainViewerFrames(data) {
   return [
     ...(data?.radar?.past || []),
     ...(data?.radar?.nowcast || [])
-  ].slice(-12);
+  ].slice(-RAINVIEWER_FRAME_LIMIT);
+}
+
+function resetRainViewerLayers() {
+  for (const layer of state.rainviewerLayers.values()) {
+    if (state.map.hasLayer(layer)) {
+      state.map.removeLayer(layer);
+    }
+  }
+  state.rainviewerLayers.clear();
+  state.rainviewerLayer = null;
 }
 
 function renderRainViewerFrame(index) {
-  const frame = state.rainviewerFrames[index];
-  if (!frame) return;
+  const frameCount = state.rainviewerFrames.length;
+  if (!frameCount) return;
 
-  const wasVisible = state.rainviewerLayer && state.map.hasLayer(state.rainviewerLayer);
-  if (state.rainviewerLayer) {
-    state.map.removeLayer(state.rainviewerLayer);
+  state.rainviewerFrameIndex = (index + frameCount) % frameCount;
+  const nextLayer = ensureRainViewerLayer(state.rainviewerFrameIndex);
+  if (!nextLayer) return;
+
+  for (const layer of state.rainviewerLayers.values()) {
+    layer.setOpacity(layer === nextLayer ? RAINVIEWER_OPACITY : 0);
   }
 
-  const size = state.rainviewerHd ? 512 : 256;
-  state.rainviewerLayer = L.tileLayer(`${state.rainviewerHost}${frame.path}/${size}/{z}/{x}/{y}/2/1_1.png`, {
-    tileSize: size,
-    zoomOffset: size === 512 ? -1 : 0,
-    maxZoom: size === 512 ? 10 : 12,
-    opacity: 0.72,
-    attribution: state.rainviewerHd ? "RainViewer HD" : "RainViewer"
-  });
+  state.rainviewerLayer = nextLayer;
+  bringRadarForward();
 
-  if (wasVisible || state.activeRadar === "rainviewer") {
-    state.rainviewerLayer.addTo(state.map);
-    bringRadarForward();
-  }
+  const frame = state.rainviewerFrames[state.rainviewerFrameIndex];
   el.radarTimestamp.textContent = `Radar ${formatUnix(frame.time)}${state.rainviewerHd ? " HD" : ""}`;
 }
 
-function toggleRadarAnimation() {
-  if (state.activeRadar !== "rainviewer") {
-    setRadarSource("rainviewer");
-  }
+function ensureRainViewerLayer(index) {
+  const frame = state.rainviewerFrames[index];
+  if (!frame || !state.rainviewerHost) return null;
 
+  const key = `${state.rainviewerHd ? "hd" : "sd"}:${frame.path}`;
+  const existing = state.rainviewerLayers.get(key);
+  if (existing) return existing;
+
+  const size = state.rainviewerHd ? 512 : 256;
+  const maxNativeZoom = state.rainviewerHd ? RAINVIEWER_NATIVE_ZOOM + 1 : RAINVIEWER_NATIVE_ZOOM;
+  const layer = L.tileLayer(`${state.rainviewerHost}${frame.path}/${size}/{z}/{x}/{y}/2/1_1.png`, {
+    tileSize: size,
+    zoomOffset: size === 512 ? -1 : 0,
+    minZoom: 0,
+    maxZoom: MAP_MAX_ZOOM,
+    minNativeZoom: 0,
+    maxNativeZoom,
+    opacity: 0,
+    updateWhenIdle: true,
+    updateWhenZooming: false,
+    keepBuffer: 3,
+    className: "rainviewer-tile",
+    attribution: state.rainviewerHd ? "RainViewer HD" : "RainViewer"
+  });
+
+  layer.addTo(state.map);
+  layer.setOpacity(0);
+  state.rainviewerLayers.set(key, layer);
+  return layer;
+}
+
+function preloadRainViewerFrames(activeIndex) {
+  const frameCount = state.rainviewerFrames.length;
+  if (!frameCount) return;
+
+  window.requestAnimationFrame(() => {
+    for (let offset = 1; offset < frameCount; offset += 1) {
+      ensureRainViewerLayer((activeIndex + offset) % frameCount);
+    }
+    bringRadarForward();
+  });
+}
+
+function toggleRadarAnimation() {
   if (state.radarAnimationTimer) {
     stopRadarAnimation();
     return;
   }
+  startRadarAnimation();
+}
 
+function startRadarAnimation() {
+  if (state.radarAnimationTimer) return;
   if (state.rainviewerFrames.length < 2) {
     showToast("Radar animation is not available yet.");
     return;
   }
 
+  preloadRainViewerFrames(state.rainviewerFrameIndex);
   el.radarPlayButton.textContent = "Pause";
   el.radarPlayButton.classList.add("active");
   state.radarAnimationTimer = window.setInterval(() => {
-    state.rainviewerFrameIndex = (state.rainviewerFrameIndex + 1) % state.rainviewerFrames.length;
-    renderRainViewerFrame(state.rainviewerFrameIndex);
-  }, 700);
+    renderRainViewerFrame(state.rainviewerFrameIndex + 1);
+  }, RAINVIEWER_FRAME_MS);
 }
 
 function stopRadarAnimation() {
@@ -458,32 +517,21 @@ function stopRadarAnimation() {
 }
 
 function toggleRadarHd() {
+  const shouldResumeAnimation = Boolean(state.radarAnimationTimer);
+  if (shouldResumeAnimation) {
+    stopRadarAnimation();
+  }
+
   state.rainviewerHd = !state.rainviewerHd;
   el.radarHdButton.classList.toggle("active", state.rainviewerHd);
   el.radarHdButton.textContent = state.rainviewerHd ? "HD" : "SD";
+  resetRainViewerLayers();
   renderRainViewerFrame(state.rainviewerFrameIndex);
-}
+  preloadRainViewerFrames(state.rainviewerFrameIndex);
 
-function setRadarSource(source) {
-  state.activeRadar = source;
-  el.rainviewerLayerButton.classList.toggle("active", source === "rainviewer");
-  el.nwsLayerButton.classList.toggle("active", source === "nws");
-
-  if (state.rainviewerLayer && state.map.hasLayer(state.rainviewerLayer)) {
-    state.map.removeLayer(state.rainviewerLayer);
+  if (shouldResumeAnimation) {
+    startRadarAnimation();
   }
-  if (state.nwsLayer && state.map.hasLayer(state.nwsLayer)) {
-    state.map.removeLayer(state.nwsLayer);
-  }
-
-  if (source === "rainviewer" && state.rainviewerLayer) {
-    renderRainViewerFrame(state.rainviewerFrameIndex);
-  } else if (source === "nws") {
-    stopRadarAnimation();
-    state.nwsLayer.addTo(state.map);
-    el.radarTimestamp.textContent = "NWS MRMS composite reflectivity";
-  }
-  bringRadarForward();
 }
 
 function setBaseMap(source) {
@@ -507,11 +555,13 @@ function setBaseMap(source) {
 }
 
 function bringRadarForward() {
+  for (const layer of state.rainviewerLayers.values()) {
+    if (layer !== state.rainviewerLayer && state.map.hasLayer(layer)) {
+      layer.bringToFront();
+    }
+  }
   if (state.rainviewerLayer && state.map.hasLayer(state.rainviewerLayer)) {
     state.rainviewerLayer.bringToFront();
-  }
-  if (state.nwsLayer && state.map.hasLayer(state.nwsLayer)) {
-    state.nwsLayer.bringToFront();
   }
   if (state.marker) {
     state.marker.bringToFront();
