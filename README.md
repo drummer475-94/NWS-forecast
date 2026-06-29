@@ -1,6 +1,6 @@
 # NWS Forecast
 
-Mobile-first local weather app using National Weather Service forecast data with RainViewer/NWS radar overlays and USGS street/satellite basemaps.
+Mobile-first local weather app using National Weather Service forecast data with animated RainViewer radar and USGS street/satellite basemaps.
 
 ## GitHub Pages
 
