@@ -1,184 +1,129 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NWS Weather Dashboard</title>
-    
-    <!-- Google Fonts: Inter -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    
-    <!-- Leaflet CSS -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
-    
-    <!-- Custom CSS -->
-    <link rel="stylesheet" href="css/style.css">
-</head>
-<body>
-    <!-- Ambient Weather Particle Background Canvas -->
-    <canvas id="weather-ambient-canvas"></canvas>
-
-    <div class="app-container">
-        <!-- Severe Weather Alert Banner -->
-        <div id="alerts-banner" class="alerts-banner hidden">
-            <span id="alerts-banner-content"></span>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0f172a">
+    <title>NWS Local Weather</title>
+    <link rel="preconnect" href="https://api.weather.gov">
+    <link rel="preconnect" href="https://api.rainviewer.com">
+    <link rel="preconnect" href="https://api.zippopotam.us">
+    <link rel="preconnect" href="https://basemap.nationalmap.gov">
+    <link rel="preconnect" href="https://tilecache.rainviewer.com">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">National Weather Service</p>
+          <h1>Local Forecast</h1>
         </div>
+        <button class="icon-button" id="refreshButton" type="button" aria-label="Refresh forecast">
+          <span aria-hidden="true">↻</span>
+        </button>
+      </header>
 
-        <!-- Header & Search -->
-        <header class="glass-panel">
-            <div class="logo">
-                <i data-lucide="cloud-sun"></i>
-                <h1>NWS Weather</h1>
+      <main>
+        <section class="hero-panel" aria-live="polite">
+          <div class="status-row">
+            <div>
+              <p class="location-label" id="locationLabel">Finding your location</p>
+              <p class="updated-label" id="updatedLabel">Use the location prompt to load your NWS forecast.</p>
             </div>
-            <div class="search-container">
-                <form id="search-form" autocomplete="off">
-                    <input type="text" id="search-input" placeholder="Search city or zip code..." autocomplete="off">
-                    <button type="submit" id="search-btn"><i data-lucide="search"></i></button>
-                    <button type="button" id="geo-btn" title="Use My Location"><i data-lucide="navigation"></i></button>
-                </form>
-                <div id="search-suggestions" class="suggestions-list hidden"></div>
-                <div id="search-error" class="error-msg hidden"></div>
+            <span class="source-pill">NWS data</span>
+          </div>
+
+          <div class="current-grid">
+            <div class="current-temp">
+              <span id="currentTemp">--</span>
+              <span class="degree">°</span>
             </div>
-        </header>
-
-        <!-- Main Content -->
-        <main>
-            <div id="loading-overlay" class="glass-panel hidden">
-                <i data-lucide="loader-2" class="spinner"></i>
-                <p>Loading weather data...</p>
-            </div>
-
-            <!-- Top Row: Current Conditions & Map -->
-            <div class="top-row">
-                <!-- Current Conditions -->
-                <section id="current-conditions" class="glass-panel current-card hidden">
-                    <h2 id="location-name">City Name</h2>
-                    <div class="current-main">
-                        <div class="temp-display">
-                            <i id="current-icon" data-lucide="cloud"></i>
-                            <span id="current-temp">--°</span>
-                        </div>
-                        <p id="current-desc" class="desc">Loading...</p>
-                    </div>
-                    <div class="current-details">
-                        <div class="detail-item">
-                            <i data-lucide="wind"></i>
-                            <div>
-                                <span>Wind</span>
-                                <strong id="current-wind">--</strong>
-                            </div>
-                        </div>
-                        <div class="detail-item">
-                            <i data-lucide="droplets"></i>
-                            <div>
-                                <span>Precip</span>
-                                <strong id="current-precip">--%</strong>
-                            </div>
-                        </div>
-                        <div class="detail-item">
-                            <i data-lucide="thermometer"></i>
-                            <div>
-                                <span>Feels Like</span>
-                                <strong id="current-feels-like">--°</strong>
-                            </div>
-                        </div>
-                        <div class="detail-item">
-                            <i data-lucide="droplet"></i>
-                            <div>
-                                <span>Humidity</span>
-                                <strong id="current-humidity">--%</strong>
-                            </div>
-                        </div>
-                    </div>
-                </section>
-
-                <!-- Radar Map -->
-                <section class="glass-panel map-card">
-                    <div class="card-header">
-                        <div style="display: flex; align-items: center; gap: 8px;">
-                            <h2>Live Radar</h2>
-                            <span id="radar-time" class="radar-time">Loading...</span>
-                        </div>
-                    </div>
-                    <div class="map-wrapper">
-                        <div id="radar-map" class="map-container"></div>
-                        
-                        <!-- Floating Glass Control Panel -->
-                        <div class="radar-controls-floating">
-                            <div class="btn-group overlay-modes">
-                                <button type="button" id="toggle-radar" class="toggle-btn active" title="Show Radar Reflectivity">Radar</button>
-                                <button type="button" id="toggle-clouds" class="toggle-btn" title="Show Satellite Cloud View">Clouds</button>
-                                <button type="button" id="toggle-vapor" class="toggle-btn" title="Show Water Vapor Map">Vapor</button>
-                            </div>
-                            <button type="button" id="toggle-play" class="toggle-btn play-btn" title="Play/Pause Animation">
-                                <i data-lucide="play"></i>
-                            </button>
-                        </div>
-
-                        <!-- Floating Map Legend -->
-                        <div id="radar-legend" class="radar-legend-overlay">
-                            <div class="legend-title" id="legend-title">Radar (dBZ)</div>
-                            <div class="legend-bar-container">
-                                <div class="legend-bar" id="legend-gradient"></div>
-                                <div class="legend-labels" id="legend-labels">
-                                    <span>Light</span>
-                                    <span>Moderate</span>
-                                    <span>Heavy</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </section>
-            </div>
-
-            <!-- Middle Row: Hourly Forecast -->
-            <section class="glass-panel forecast-card hidden" id="hourly-section">
-                <h2>Hourly Forecast</h2>
-                <div class="hourly-container" id="hourly-container">
-                    <!-- Hourly items injected via JS -->
+            <div class="current-details">
+              <p id="currentSummary">Waiting for forecast data</p>
+              <div class="metric-row">
+                <div>
+                  <span class="metric-label">Feels like</span>
+                  <strong id="feelsLike">--°</strong>
                 </div>
-            </section>
-
-            <!-- Bottom Row: 7-Day Forecast -->
-            <section class="glass-panel forecast-card hidden" id="forecast-section">
-                <h2>7-Day Forecast</h2>
-                <div class="forecast-container" id="forecast-container">
-                    <!-- Forecast items injected via JS -->
+                <div>
+                  <span class="metric-label">Wind</span>
+                  <strong id="wind">--</strong>
                 </div>
-            </section>
-        </main>
+                <div>
+                  <span class="metric-label">Humidity</span>
+                  <strong id="humidity">--</strong>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="location-forms">
+            <form class="manual-location" id="zipLocationForm">
+              <label for="zipLocation">ZIP code</label>
+              <div class="input-row">
+                <input id="zipLocation" name="zipLocation" type="text" inputmode="numeric" autocomplete="postal-code" placeholder="90210" maxlength="5" pattern="[0-9]{5}">
+                <button type="submit">Load</button>
+              </div>
+            </form>
+
+            <form class="manual-location" id="manualLocationForm">
+              <label for="manualLocation">Latitude, longitude</label>
+              <div class="input-row">
+                <input id="manualLocation" name="manualLocation" type="text" inputmode="decimal" autocomplete="off" placeholder="38.8977, -77.0365">
+                <button type="submit">Load</button>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <h2>Next 24 Hours</h2>
+            <span id="hourlyCount">--</span>
+          </div>
+          <div class="hourly-scroll" id="hourlyForecast" aria-label="Hourly forecast"></div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <h2>7 Day Forecast</h2>
+            <span id="dailyOffice">--</span>
+          </div>
+          <div class="daily-list" id="dailyForecast"></div>
+        </section>
+
+        <section class="section-block radar-block">
+          <div class="section-heading">
+            <h2>Radar</h2>
+            <span id="radarTimestamp">Loading radar</span>
+          </div>
+
+          <div class="radar-toolbar" role="group" aria-label="Radar source">
+            <button class="segmented active" id="rainviewerLayerButton" type="button">RainViewer</button>
+            <button class="segmented" id="nwsLayerButton" type="button">NWS MRMS</button>
+            <button class="locate-map" id="centerMapButton" type="button">Center</button>
+          </div>
+
+          <div class="map-toolbar" role="group" aria-label="Map view">
+            <button class="segmented active" id="streetMapButton" type="button">Street</button>
+            <button class="segmented" id="satelliteMapButton" type="button">Satellite</button>
+          </div>
+
+          <div id="radarMap" class="radar-map" aria-label="Interactive radar map"></div>
+          <p class="attribution">
+            Forecasts from the National Weather Service. Basemaps from USGS. ZIP lookup from
+            Zippopotam.us. Radar layers from NWS MRMS and
+            <a href="https://www.rainviewer.com/" target="_blank" rel="noreferrer">RainViewer</a>.
+          </p>
+        </section>
+      </main>
     </div>
 
-    <!-- Weather Alert Modal -->
-    <div id="alert-modal" class="modal hidden">
-        <div class="modal-content glass-panel">
-            <div class="modal-header">
-                <h3 id="modal-alert-title">Severe Weather Alert</h3>
-                <button type="button" id="close-modal-btn" class="close-btn" title="Close Details">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div class="alert-meta">
-                    <span id="modal-alert-severity" class="alert-tag"></span>
-                    <span id="modal-alert-urgency" class="alert-tag"></span>
-                </div>
-                <div id="modal-alert-instruction" class="alert-instruction"></div>
-                <div id="modal-alert-desc" class="alert-desc-text"></div>
-            </div>
-        </div>
-    </div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <!-- Leaflet JS -->
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-    
-    <!-- Lucide Icons JS -->
-    <script src="https://unpkg.com/lucide@latest"></script>
-    
-    <!-- Application JS -->
-    <script src="js/api.js?v=1.2"></script>
-    <script src="js/map.js?v=1.2"></script>
-    <script src="js/ui.js?v=1.2"></script>
-    <script src="js/app.js?v=1.2"></script>
-</body>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <script src="app.js"></script>
+  </body>
 </html>
