@@ -108,9 +108,8 @@
             <span id="radarTimestamp">Loading radar</span>
           </div>
 
-          <div class="radar-toolbar" role="group" aria-label="Radar source">
-            <button class="segmented active" id="rainviewerLayerButton" type="button">RainViewer</button>
-            <button class="segmented" id="nwsLayerButton" type="button">NWS MRMS</button>
+          <div class="radar-toolbar radar-statusbar" role="group" aria-label="Radar controls">
+            <span class="radar-source-pill">RainViewer</span>
             <button class="locate-map" id="centerMapButton" type="button">Center</button>
           </div>
 
@@ -126,10 +125,10 @@
             <button class="segmented" id="satelliteMapButton" type="button">Satellite</button>
           </div>
 
-          <div id="radarMap" class="radar-map" aria-label="Interactive radar map"></div>
+          <div id="radarMap" class="radar-map" aria-label="Interactive RainViewer radar map"></div>
           <p class="attribution">
             Forecasts from the National Weather Service. Basemaps from USGS. ZIP lookup from
-            Zippopotam.us. Radar layers from NWS MRMS and
+            Zippopotam.us. Radar layers from
             <a href="https://www.rainviewer.com/" target="_blank" rel="noreferrer">RainViewer</a>.
           </p>
         </section>
