@@ -14,6 +14,11 @@ const state = {
   streetLayer: null,
   satelliteLayer: null,
   rainviewerLayer: null,
+  rainviewerHost: "",
+  rainviewerFrames: [],
+  rainviewerFrameIndex: 0,
+  rainviewerHd: true,
+  radarAnimationTimer: 0,
   nwsLayer: null,
   activeBaseMap: "street",
   activeRadar: "rainviewer"
@@ -36,9 +41,16 @@ const el = {
   hourlyCount: document.querySelector("#hourlyCount"),
   dailyForecast: document.querySelector("#dailyForecast"),
   dailyOffice: document.querySelector("#dailyOffice"),
+  alertsPanel: document.querySelector("#alertsPanel"),
+  alertsCount: document.querySelector("#alertsCount"),
+  alertsList: document.querySelector("#alertsList"),
   radarTimestamp: document.querySelector("#radarTimestamp"),
   rainviewerLayerButton: document.querySelector("#rainviewerLayerButton"),
   nwsLayerButton: document.querySelector("#nwsLayerButton"),
+  radarPlayButton: document.querySelector("#radarPlayButton"),
+  radarHdButton: document.querySelector("#radarHdButton"),
+  zoomOutButton: document.querySelector("#zoomOutButton"),
+  zoomInButton: document.querySelector("#zoomInButton"),
   streetMapButton: document.querySelector("#streetMapButton"),
   satelliteMapButton: document.querySelector("#satelliteMapButton"),
   centerMapButton: document.querySelector("#centerMapButton"),
@@ -51,6 +63,10 @@ el.zipLocationForm.addEventListener("submit", handleZipLocation);
 el.manualLocationForm.addEventListener("submit", handleManualLocation);
 el.rainviewerLayerButton.addEventListener("click", () => setRadarSource("rainviewer"));
 el.nwsLayerButton.addEventListener("click", () => setRadarSource("nws"));
+el.radarPlayButton.addEventListener("click", toggleRadarAnimation);
+el.radarHdButton.addEventListener("click", toggleRadarHd);
+el.zoomOutButton.addEventListener("click", () => state.map.zoomOut());
+el.zoomInButton.addEventListener("click", () => state.map.zoomIn());
 el.streetMapButton.addEventListener("click", () => setBaseMap("street"));
 el.satelliteMapButton.addEventListener("click", () => setBaseMap("satellite"));
 el.centerMapButton.addEventListener("click", centerMap);
@@ -139,14 +155,16 @@ async function loadForecast(lat, lon) {
     state.office = props.cwa || "";
     state.city = formatRelativeLocation(props.relativeLocation);
 
-    const [daily, hourly] = await Promise.all([
+    const [daily, hourly, alerts] = await Promise.all([
       fetchJson(state.forecastUrl),
-      fetchJson(state.hourlyUrl)
+      fetchJson(state.hourlyUrl),
+      fetchJson(`https://api.weather.gov/alerts/active?point=${state.lat},${state.lon}`).catch(() => null)
     ]);
 
     updateCurrent(hourly.properties.periods[0], hourly.properties.generatedAt);
     renderHourly(hourly.properties.periods.slice(0, 24));
-    renderDaily(daily.properties.periods);
+    renderDaily(daily.properties.periods, hourly.properties.periods);
+    renderAlerts(alerts?.features || []);
     updateLocationLabels(daily.properties.updated);
     updateMapPosition(state.lat, state.lon);
   } catch (error) {
@@ -197,11 +215,46 @@ function renderHourly(periods) {
   el.hourlyForecast.append(fragment);
 }
 
-function renderDaily(periods) {
+function renderAlerts(features) {
+  const alerts = features
+    .map(feature => feature.properties)
+    .filter(alert => /\b(watch|warning)\b/i.test(alert.event || ""))
+    .sort((a, b) => new Date(a.ends || a.expires || 0) - new Date(b.ends || b.expires || 0));
+
+  el.alertsList.innerHTML = "";
+  el.alertsCount.textContent = alerts.length ? `${alerts.length} active` : "None";
+  el.alertsPanel.classList.remove("hidden");
+
+  if (!alerts.length) {
+    el.alertsList.innerHTML = `<div class="empty-state">No active watches or warnings for this location.</div>`;
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const alert of alerts.slice(0, 6)) {
+    const card = document.createElement("article");
+    card.className = `alert-card ${alert.messageType === "Alert" ? "alert-card-hot" : ""}`;
+    card.innerHTML = `
+      <div>
+        <div class="alert-title">${escapeHtml(alert.event || "Weather alert")}</div>
+        <p class="alert-headline">${escapeHtml(alert.headline || alert.areaDesc || "NWS active alert")}</p>
+      </div>
+      <div class="alert-meta">
+        <span>${escapeHtml(alert.severity || "Alert")}</span>
+        <span>${formatAlertEnds(alert.ends || alert.expires)}</span>
+      </div>
+    `;
+    fragment.append(card);
+  }
+  el.alertsList.append(fragment);
+}
+
+function renderDaily(periods, hourlyPeriods = []) {
   el.dailyOffice.textContent = state.office ? `${state.office} office` : "NWS";
   el.dailyForecast.innerHTML = "";
 
   const dayPeriods = mergeDailyPeriods(periods).slice(0, 7);
+  const heatByDay = getHeatAlertsByDay(hourlyPeriods);
   if (!dayPeriods.length) {
     el.dailyForecast.innerHTML = `<div class="empty-state">No 7 day forecast returned by NWS.</div>`;
     return;
@@ -211,10 +264,12 @@ function renderDaily(periods) {
   for (const day of dayPeriods) {
     const card = document.createElement("article");
     card.className = "day-card";
+    const heatAlert = heatByDay.get(day.dateKey);
     card.innerHTML = `
       <img src="${safeUrl(day.icon)}" alt="">
       <div>
         <div class="day-name">${escapeHtml(day.name)}</div>
+        ${heatAlert ? `<div class="heat-banner">Feels like up to ${Math.round(heatAlert)}°</div>` : ""}
         <p class="day-summary">${escapeHtml(day.summary)}</p>
       </div>
       <div class="day-temp">${formatHighLow(day)}</div>
@@ -227,13 +282,15 @@ function renderDaily(periods) {
 function mergeDailyPeriods(periods) {
   const days = new Map();
   for (const period of periods) {
-    const key = new Date(period.startTime).toLocaleDateString(undefined, {
+    const date = new Date(period.startTime);
+    const key = date.toLocaleDateString(undefined, {
       weekday: "long",
       month: "short",
       day: "numeric"
     });
     const existing = days.get(key) || {
       name: key,
+      dateKey: toDateKey(period.startTime),
       high: null,
       low: null,
       icon: period.icon,
@@ -252,9 +309,40 @@ function mergeDailyPeriods(periods) {
   return Array.from(days.values());
 }
 
+function getHeatAlertsByDay(periods) {
+  const heatByDay = new Map();
+  for (const period of periods) {
+    const humidity = getQuantValue(period.relativeHumidity);
+    const feels = calculateFeelsLike(period.temperature, humidity, period.windSpeed);
+    if (!Number.isFinite(feels) || feels <= 90) continue;
+
+    const key = toDateKey(period.startTime);
+    const existing = heatByDay.get(key) || -Infinity;
+    heatByDay.set(key, Math.max(existing, feels));
+  }
+  return heatByDay;
+}
+
+function toDateKey(value) {
+  const date = new Date(value);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatAlertEnds(value) {
+  if (!value) return "Until further notice";
+  return `Until ${new Date(value).toLocaleTimeString(undefined, {
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit"
+  })}`;
+}
+
 function initMap(lat, lon, zoom) {
   state.map = L.map("radarMap", {
-    zoomControl: true,
+    zoomControl: false,
     tap: true,
     touchZoom: true,
     scrollWheelZoom: false
@@ -290,26 +378,13 @@ function initMap(lat, lon, zoom) {
 async function loadRainViewerLayer() {
   try {
     const data = await fetchJson("https://api.rainviewer.com/public/weather-maps.json", {});
-    const frame = getLatestRainViewerFrame(data);
-    if (!frame) throw new Error("RainViewer returned no radar frames.");
+    state.rainviewerHost = data.host;
+    state.rainviewerFrames = getRainViewerFrames(data);
+    if (!state.rainviewerFrames.length) throw new Error("RainViewer returned no radar frames.");
+    state.rainviewerFrameIndex = state.rainviewerFrames.length - 1;
 
-    if (state.rainviewerLayer) {
-      state.map.removeLayer(state.rainviewerLayer);
-    }
+    renderRainViewerFrame(state.rainviewerFrameIndex);
 
-    state.rainviewerLayer = L.tileLayer(`${data.host}${frame.path}/512/{z}/{x}/{y}/2/1_1.png`, {
-      tileSize: 512,
-      zoomOffset: -1,
-      maxZoom: 10,
-      opacity: 0.72,
-      attribution: "RainViewer"
-    });
-
-    if (state.activeRadar === "rainviewer") {
-      state.rainviewerLayer.addTo(state.map);
-      bringRadarForward();
-    }
-    el.radarTimestamp.textContent = `Radar ${formatUnix(frame.time)}`;
   } catch (error) {
     console.error(error);
     el.radarTimestamp.textContent = "RainViewer unavailable";
@@ -319,12 +394,74 @@ async function loadRainViewerLayer() {
   }
 }
 
-function getLatestRainViewerFrame(data) {
-  const frames = [
+function getRainViewerFrames(data) {
+  return [
     ...(data?.radar?.past || []),
     ...(data?.radar?.nowcast || [])
-  ];
-  return frames.at(-1);
+  ].slice(-12);
+}
+
+function renderRainViewerFrame(index) {
+  const frame = state.rainviewerFrames[index];
+  if (!frame) return;
+
+  const wasVisible = state.rainviewerLayer && state.map.hasLayer(state.rainviewerLayer);
+  if (state.rainviewerLayer) {
+    state.map.removeLayer(state.rainviewerLayer);
+  }
+
+  const size = state.rainviewerHd ? 512 : 256;
+  state.rainviewerLayer = L.tileLayer(`${state.rainviewerHost}${frame.path}/${size}/{z}/{x}/{y}/2/1_1.png`, {
+    tileSize: size,
+    zoomOffset: size === 512 ? -1 : 0,
+    maxZoom: size === 512 ? 10 : 12,
+    opacity: 0.72,
+    attribution: state.rainviewerHd ? "RainViewer HD" : "RainViewer"
+  });
+
+  if (wasVisible || state.activeRadar === "rainviewer") {
+    state.rainviewerLayer.addTo(state.map);
+    bringRadarForward();
+  }
+  el.radarTimestamp.textContent = `Radar ${formatUnix(frame.time)}${state.rainviewerHd ? " HD" : ""}`;
+}
+
+function toggleRadarAnimation() {
+  if (state.activeRadar !== "rainviewer") {
+    setRadarSource("rainviewer");
+  }
+
+  if (state.radarAnimationTimer) {
+    stopRadarAnimation();
+    return;
+  }
+
+  if (state.rainviewerFrames.length < 2) {
+    showToast("Radar animation is not available yet.");
+    return;
+  }
+
+  el.radarPlayButton.textContent = "Pause";
+  el.radarPlayButton.classList.add("active");
+  state.radarAnimationTimer = window.setInterval(() => {
+    state.rainviewerFrameIndex = (state.rainviewerFrameIndex + 1) % state.rainviewerFrames.length;
+    renderRainViewerFrame(state.rainviewerFrameIndex);
+  }, 700);
+}
+
+function stopRadarAnimation() {
+  if (!state.radarAnimationTimer) return;
+  window.clearInterval(state.radarAnimationTimer);
+  state.radarAnimationTimer = 0;
+  el.radarPlayButton.textContent = "Play";
+  el.radarPlayButton.classList.remove("active");
+}
+
+function toggleRadarHd() {
+  state.rainviewerHd = !state.rainviewerHd;
+  el.radarHdButton.classList.toggle("active", state.rainviewerHd);
+  el.radarHdButton.textContent = state.rainviewerHd ? "HD" : "SD";
+  renderRainViewerFrame(state.rainviewerFrameIndex);
 }
 
 function setRadarSource(source) {
@@ -340,8 +477,9 @@ function setRadarSource(source) {
   }
 
   if (source === "rainviewer" && state.rainviewerLayer) {
-    state.rainviewerLayer.addTo(state.map);
+    renderRainViewerFrame(state.rainviewerFrameIndex);
   } else if (source === "nws") {
+    stopRadarAnimation();
     state.nwsLayer.addTo(state.map);
     el.radarTimestamp.textContent = "NWS MRMS composite reflectivity";
   }

@@ -78,6 +78,14 @@
           </div>
         </section>
 
+        <section class="alerts-panel hidden" id="alertsPanel" aria-live="polite">
+          <div class="section-heading">
+            <h2>Active Watches & Warnings</h2>
+            <span id="alertsCount">--</span>
+          </div>
+          <div class="alerts-list" id="alertsList"></div>
+        </section>
+
         <section class="section-block">
           <div class="section-heading">
             <h2>Next 24 Hours</h2>
@@ -104,6 +112,13 @@
             <button class="segmented active" id="rainviewerLayerButton" type="button">RainViewer</button>
             <button class="segmented" id="nwsLayerButton" type="button">NWS MRMS</button>
             <button class="locate-map" id="centerMapButton" type="button">Center</button>
+          </div>
+
+          <div class="radar-toolbar" role="group" aria-label="Radar animation and zoom">
+            <button class="segmented" id="radarPlayButton" type="button">Play</button>
+            <button class="segmented active" id="radarHdButton" type="button">HD</button>
+            <button class="zoom-button" id="zoomOutButton" type="button" aria-label="Zoom out">−</button>
+            <button class="zoom-button" id="zoomInButton" type="button" aria-label="Zoom in">+</button>
           </div>
 
           <div class="map-toolbar" role="group" aria-label="Map view">

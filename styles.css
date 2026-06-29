@@ -89,7 +89,8 @@ h2 {
 }
 
 .icon-button,
-.locate-map {
+.locate-map,
+.zoom-button {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.08);
@@ -107,7 +108,8 @@ h2 {
 }
 
 .hero-panel,
-.section-block {
+.section-block,
+.alerts-panel {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(31, 41, 55, 0.88);
@@ -261,6 +263,55 @@ h2 {
   padding: 16px;
 }
 
+.alerts-panel {
+  margin-top: 16px;
+  padding: 16px;
+  border-color: rgba(245, 158, 11, 0.35);
+  background: rgba(57, 42, 24, 0.86);
+}
+
+.alerts-list {
+  display: grid;
+  gap: 10px;
+}
+
+.alert-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  min-height: 76px;
+  border: 1px solid rgba(245, 158, 11, 0.34);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(245, 158, 11, 0.13);
+}
+
+.alert-card-hot {
+  border-color: rgba(248, 113, 113, 0.48);
+  background: rgba(127, 29, 29, 0.28);
+}
+
+.alert-title {
+  font-weight: 850;
+}
+
+.alert-headline {
+  margin-top: 4px;
+  color: #fed7aa;
+  font-size: 0.86rem;
+  line-height: 1.35;
+}
+
+.alert-meta {
+  display: grid;
+  gap: 4px;
+  color: #fde68a;
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-align: right;
+}
+
 .section-heading {
   margin-bottom: 12px;
 }
@@ -346,6 +397,17 @@ h2 {
   line-height: 1.35;
 }
 
+.heat-banner {
+  display: inline-block;
+  margin-top: 6px;
+  border-radius: 8px;
+  padding: 5px 8px;
+  background: rgba(245, 158, 11, 0.18);
+  color: #fde68a;
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
 .day-temp {
   min-width: 58px;
   text-align: right;
@@ -385,6 +447,14 @@ h2 {
 .locate-map {
   flex: 0 0 auto;
   padding-inline: 12px;
+}
+
+.zoom-button {
+  width: 48px;
+  flex: 0 0 48px;
+  font-size: 1.45rem;
+  font-weight: 900;
+  line-height: 1;
 }
 
 .radar-map {
@@ -447,6 +517,10 @@ h2 {
   color: var(--muted);
 }
 
+.hidden {
+  display: none !important;
+}
+
 @media (max-width: 720px) {
   .app-shell {
     padding-inline: 12px;
@@ -475,6 +549,16 @@ h2 {
 
   .day-temp {
     grid-column: 2;
+    text-align: left;
+  }
+
+  .alert-card {
+    grid-template-columns: 1fr;
+  }
+
+  .alert-meta {
+    display: flex;
+    flex-wrap: wrap;
     text-align: left;
   }
 
@@ -510,6 +594,10 @@ h2 {
 
   .locate-map {
     flex: 1 1 100%;
+  }
+
+  .zoom-button {
+    flex: 1 1 64px;
   }
 
   h1 {
