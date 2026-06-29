@@ -129,7 +129,9 @@ async function handleZipLocation(event) {
     el.manualLocation.value = `${roundCoord(lat)}, ${roundCoord(lon)}`;
     await loadForecast(lat, lon);
   } catch (error) {
-    console.error(error);
+    if (error.status !== 404) {
+      console.error(error);
+    }
     showToast(`ZIP code ${zip} could not be found.`);
   } finally {
     setLoading(false);
@@ -631,7 +633,11 @@ function updateMapPosition(lat, lon) {
 async function fetchJson(url, headers = NWS_HEADERS) {
   const response = await fetch(url, { headers });
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText} from ${url}`);
+    const message = `${response.status} ${response.statusText || "response"} from ${url}`;
+    throw Object.assign(new Error(message), {
+      status: response.status,
+      url
+    });
   }
   return response.json();
 }
