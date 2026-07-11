@@ -281,6 +281,25 @@ h2 {
   font-weight: 750;
 }
 
+.weather-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.weather-stats > div {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 11px;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.weather-stats strong {
+  color: #fff;
+  font-size: 0.98rem;
+}
+
 .input-row {
   display: grid;
   grid-template-columns: 1fr auto;

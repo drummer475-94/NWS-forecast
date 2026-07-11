@@ -15,6 +15,7 @@ const state = {
   office: "",
   forecastUrl: "",
   hourlyUrl: "",
+  requestController: null,
   map: null,
   marker: null,
   streetLayer: null,
@@ -42,8 +43,10 @@ const el = {
   humidity: document.querySelector("#humidity"),
   zipLocationForm: document.querySelector("#zipLocationForm"),
   zipLocation: document.querySelector("#zipLocation"),
-  manualLocationForm: document.querySelector("#manualLocationForm"),
-  manualLocation: document.querySelector("#manualLocation"),
+  precipChance: document.querySelector("#precipChance"),
+  dewPoint: document.querySelector("#dewPoint"),
+  visibility: document.querySelector("#visibility"),
+  pressure: document.querySelector("#pressure"),
   hourlyForecast: document.querySelector("#hourlyForecast"),
   hourlyCount: document.querySelector("#hourlyCount"),
   dailyForecast: document.querySelector("#dailyForecast"),
@@ -66,7 +69,6 @@ const el = {
 document.addEventListener("DOMContentLoaded", init);
 el.refreshButton.addEventListener("click", () => refreshForecast());
 el.zipLocationForm.addEventListener("submit", handleZipLocation);
-el.manualLocationForm.addEventListener("submit", handleManualLocation);
 el.radarPlayButton.addEventListener("click", toggleRadarAnimation);
 el.radarHdButton.addEventListener("click", toggleRadarHd);
 el.zoomOutButton.addEventListener("click", () => state.map.zoomOut());
@@ -80,7 +82,7 @@ function init() {
   loadRainViewerLayer();
 
   if (!navigator.geolocation) {
-    showToast("Location is not available in this browser. Enter latitude and longitude manually.");
+    showToast("Location is not available in this browser. Enter a ZIP code instead.");
     return;
   }
 
@@ -90,9 +92,10 @@ function init() {
       loadForecast(latitude, longitude);
     },
     () => {
-      showToast("Location permission was not granted. Enter latitude and longitude manually.");
+      if (Number.isFinite(state.lat) && Number.isFinite(state.lon)) return;
+      showToast("Location permission was not granted. Enter a ZIP code instead.");
       el.locationLabel.textContent = "Manual location needed";
-      el.updatedLabel.textContent = "Use a ZIP code or latitude, longitude pair.";
+      el.updatedLabel.textContent = "Use a US ZIP code to load your local forecast.";
     },
     { enableHighAccuracy: true, timeout: 12000, maximumAge: 10 * 60 * 1000 }
   );
@@ -126,7 +129,6 @@ async function handleZipLocation(event) {
     }
 
     state.city = `${place["place name"]}, ${place["state abbreviation"]}`;
-    el.manualLocation.value = `${roundCoord(lat)}, ${roundCoord(lon)}`;
     await loadForecast(lat, lon);
   } catch (error) {
     if (error.status !== 404) {
@@ -138,51 +140,50 @@ async function handleZipLocation(event) {
   }
 }
 
-async function handleManualLocation(event) {
-  event.preventDefault();
-  const parsed = parseLatLon(el.manualLocation.value);
-  if (!parsed) {
-    showToast("Use decimal latitude and longitude, for example 38.8977, -77.0365.");
-    return;
-  }
-  await loadForecast(parsed.lat, parsed.lon);
-}
-
 async function loadForecast(lat, lon) {
+  state.requestController?.abort();
+  const controller = new AbortController();
+  state.requestController = controller;
+  const { signal } = controller;
   setLoading(true);
   state.lat = roundCoord(lat);
   state.lon = roundCoord(lon);
 
   try {
-    const point = await fetchJson(`https://api.weather.gov/points/${state.lat},${state.lon}`);
+    const point = await fetchJson(`https://api.weather.gov/points/${state.lat},${state.lon}`, NWS_HEADERS, signal);
     const props = point.properties;
     state.forecastUrl = props.forecast;
     state.hourlyUrl = props.forecastHourly;
     state.office = props.cwa || "";
     state.city = formatRelativeLocation(props.relativeLocation);
 
-    const [daily, hourly, alerts] = await Promise.all([
-      fetchJson(state.forecastUrl),
-      fetchJson(state.hourlyUrl),
-      fetchJson(`https://api.weather.gov/alerts/active?point=${state.lat},${state.lon}`).catch(() => null)
+    const [daily, hourly, alerts, observation] = await Promise.all([
+      fetchJson(state.forecastUrl, NWS_HEADERS, signal),
+      fetchJson(state.hourlyUrl, NWS_HEADERS, signal),
+      fetchJson(`https://api.weather.gov/alerts/active?point=${state.lat},${state.lon}`, NWS_HEADERS, signal).catch(() => null),
+      loadLatestObservation(props.observationStations, signal).catch(() => null)
     ]);
 
-    updateCurrent(hourly.properties.periods[0], hourly.properties.generatedAt);
+    updateCurrent(hourly.properties.periods[0], hourly.properties.generatedAt, observation?.properties);
     renderHourly(hourly.properties.periods.slice(0, 24));
     renderDaily(daily.properties.periods, hourly.properties.periods);
     renderAlerts(alerts?.features || []);
     updateLocationLabels(daily.properties.updated);
     updateMapPosition(state.lat, state.lon);
   } catch (error) {
+    if (error.name === "AbortError") return;
     console.error(error);
     showToast(error.message || "NWS forecast data could not be loaded.");
     el.updatedLabel.textContent = "Forecast unavailable. Try another nearby location.";
   } finally {
-    setLoading(false);
+    if (state.requestController === controller) {
+      state.requestController = null;
+      setLoading(false);
+    }
   }
 }
 
-function updateCurrent(period, generatedAt) {
+function updateCurrent(period, generatedAt, observation) {
   if (!period) return;
   const humidityValue = getQuantValue(period.relativeHumidity);
   const feels = calculateFeelsLike(period.temperature, humidityValue, period.windSpeed);
@@ -192,7 +193,19 @@ function updateCurrent(period, generatedAt) {
   el.feelsLike.textContent = Number.isFinite(feels) ? `${Math.round(feels)}°` : `${Math.round(period.temperature)}°`;
   el.wind.textContent = compactWind(period.windSpeed, period.windDirection);
   el.humidity.textContent = Number.isFinite(humidityValue) ? `${Math.round(humidityValue)}%` : "--";
+  el.precipChance.textContent = formatPercent(getQuantValue(period.probabilityOfPrecipitation));
+  el.dewPoint.textContent = formatTemperature(getQuantValue(period.dewpoint), period.dewpoint?.unitCode);
+  el.visibility.textContent = formatDistance(getQuantValue(observation?.visibility), observation?.visibility?.unitCode);
+  el.pressure.textContent = formatPressure(getQuantValue(observation?.barometricPressure));
   el.updatedLabel.textContent = generatedAt ? `Updated ${formatDateTime(generatedAt)}` : "Updated by NWS";
+}
+
+async function loadLatestObservation(stationsUrl, signal) {
+  if (!stationsUrl) return null;
+  const stations = await fetchJson(stationsUrl, NWS_HEADERS, signal);
+  const stationId = stations.features?.[0]?.properties?.stationIdentifier;
+  if (!stationId) return null;
+  return fetchJson(`https://api.weather.gov/stations/${stationId}/observations/latest`, NWS_HEADERS, signal);
 }
 
 function renderHourly(periods) {
@@ -630,8 +643,8 @@ function updateMapPosition(lat, lon) {
   window.setTimeout(() => state.map.invalidateSize(), 80);
 }
 
-async function fetchJson(url, headers = NWS_HEADERS) {
-  const response = await fetch(url, { headers });
+async function fetchJson(url, headers = NWS_HEADERS, signal) {
+  const response = await fetch(url, { headers, signal });
   if (!response.ok) {
     const message = `${response.status} ${response.statusText || "response"} from ${url}`;
     throw Object.assign(new Error(message), {
@@ -640,14 +653,6 @@ async function fetchJson(url, headers = NWS_HEADERS) {
     });
   }
   return response.json();
-}
-
-function parseLatLon(value) {
-  const parts = value.split(",").map(part => Number.parseFloat(part.trim()));
-  if (parts.length !== 2 || parts.some(part => Number.isNaN(part))) return null;
-  const [lat, lon] = parts;
-  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
-  return { lat, lon };
 }
 
 function roundCoord(value) {
@@ -659,6 +664,27 @@ function getQuantValue(value) {
   if (typeof value === "number") return value;
   if (typeof value.value === "number") return value.value;
   return NaN;
+}
+
+function formatPercent(value) {
+  return Number.isFinite(value) ? `${Math.round(value)}%` : "--";
+}
+
+function formatTemperature(value, unitCode = "") {
+  if (!Number.isFinite(value)) return "--";
+  const fahrenheit = unitCode.endsWith("degC") ? (value * 9 / 5) + 32 : value;
+  return `${Math.round(fahrenheit)}°`;
+}
+
+function formatDistance(value, unitCode = "") {
+  if (!Number.isFinite(value)) return "--";
+  const miles = unitCode.endsWith("m") ? value / 1609.344 : value;
+  return `${miles.toFixed(miles < 10 ? 1 : 0)} mi`;
+}
+
+function formatPressure(value) {
+  if (!Number.isFinite(value)) return "--";
+  return `${(value / 100).toFixed(0)} hPa`;
 }
 
 function calculateFeelsLike(tempF, humidity, windSpeedText) {

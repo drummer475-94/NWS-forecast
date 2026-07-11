@@ -68,13 +68,24 @@
               </div>
             </form>
 
-            <form class="manual-location" id="manualLocationForm">
-              <label for="manualLocation">Latitude, longitude</label>
-              <div class="input-row">
-                <input id="manualLocation" name="manualLocation" type="text" inputmode="decimal" autocomplete="off" placeholder="38.8977, -77.0365">
-                <button type="submit">Load</button>
+            <div class="weather-stats" aria-label="Current weather details">
+              <div>
+                <span class="metric-label">Precipitation</span>
+                <strong id="precipChance">--</strong>
               </div>
-            </form>
+              <div>
+                <span class="metric-label">Dew point</span>
+                <strong id="dewPoint">--</strong>
+              </div>
+              <div>
+                <span class="metric-label">Visibility</span>
+                <strong id="visibility">--</strong>
+              </div>
+              <div>
+                <span class="metric-label">Pressure</span>
+                <strong id="pressure">--</strong>
+              </div>
+            </div>
           </div>
         </section>
 
