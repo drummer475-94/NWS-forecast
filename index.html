@@ -10,8 +10,9 @@
     <link rel="preconnect" href="https://api.zippopotam.us">
     <link rel="preconnect" href="https://basemap.nationalmap.gov">
     <link rel="preconnect" href="https://tilecache.rainviewer.com">
+    <link rel="preconnect" href="https://opengeo.ncep.noaa.gov">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
-    <link rel="stylesheet" href="styles.css?v=20260713-1">
+    <link rel="stylesheet" href="styles.css?v=20260713-2">
   </head>
   <body>
     <div class="app-shell">
@@ -98,17 +99,19 @@
 
           <div class="radar-toolbar" role="group" aria-label="Radar animation and zoom">
             <button class="segmented" id="radarPlayButton" type="button" disabled>Play</button>
-            <button class="segmented active" id="radarHdButton" type="button" disabled>HD</button>
+            <span class="radar-quality" aria-label="Radar quality is always high definition">HD only</span>
             <button class="zoom-button" id="zoomOutButton" type="button" aria-label="Zoom out">&minus;</button>
-            <output class="zoom-level" id="zoomLevel" aria-live="polite">4 / 18</output>
+            <output class="zoom-level" id="zoomLevel" aria-live="polite">4 / 8</output>
             <button class="zoom-button" id="zoomInButton" type="button" aria-label="Zoom in">+</button>
           </div>
 
           <div class="radar-timeline" aria-hidden="true"><span id="radarProgress"></span></div>
-          <div id="radarMap" class="radar-map" aria-label="Interactive RainViewer radar map"></div>
+          <div id="radarMap" class="radar-map" aria-label="Interactive high-definition weather radar map"></div>
           <p class="attribution">
             Forecasts from the National Weather Service. Basemap from USGS. ZIP lookup from
-            Zippopotam.us. Radar layers from
+            Zippopotam.us. Local super-resolution radar from
+            <a href="https://www.weather.gov/gis/cloudgiswebservices" target="_blank" rel="noreferrer">NOAA/NWS</a>;
+            nationwide HD fallback from
             <a href="https://www.rainviewer.com/" target="_blank" rel="noreferrer">RainViewer</a>.
           </p>
         </section>
@@ -118,6 +121,6 @@
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-    <script src="app.js?v=20260713-1"></script>
+    <script src="app.js?v=20260713-2"></script>
   </body>
 </html>

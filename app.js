@@ -1,8 +1,13 @@
 const NWS_HEADERS = { Accept: 'application/geo+json' };
 const MAP_MIN_ZOOM = 2;
-const MAP_MAX_ZOOM = 18;
+const BASEMAP_MAX_ZOOM = 16;
 const RADAR_API = 'https://api.rainviewer.com/public/weather-maps.json';
-const RADAR_NATIVE_ZOOM = 10;
+const NWS_RADAR_BASE = 'https://opengeo.ncep.noaa.gov/geoserver/';
+const RAINVIEWER_PROVIDER_MAX_ZOOM = 7;
+const RAINVIEWER_TILE_SIZE = 512;
+const RAINVIEWER_ZOOM_OFFSET = -1;
+const RAINVIEWER_MAP_MAX_ZOOM = RAINVIEWER_PROVIDER_MAX_ZOOM - RAINVIEWER_ZOOM_OFFSET;
+const NWS_RADAR_MAX_ZOOM = 11;
 const RADAR_FRAME_LIMIT = 12;
 const RADAR_FRAME_MS = 650;
 const RADAR_OPACITY = 0.76;
@@ -25,11 +30,14 @@ const state = {
   radarLoadId: 0,
   radarLayer: null,
   radarLayers: new Map(),
+  radarSource: 'rainviewer',
+  radarStation: '',
   radarHost: '',
+  radarWmsUrl: '',
+  radarLayerName: '',
   radarFrames: [],
   radarFrameIndex: 0,
-  radarHd: true,
-  radarHdFallbackUsed: false,
+  radarFallbackUsed: false,
   radarAnimationFrame: 0,
   radarNextFrameAt: 0,
   radarPreloadTimer: 0,
@@ -63,7 +71,6 @@ const el = {
   radarStatus: document.querySelector('#radarStatus'),
   radarProgress: document.querySelector('#radarProgress'),
   radarPlayButton: document.querySelector('#radarPlayButton'),
-  radarHdButton: document.querySelector('#radarHdButton'),
   radarRetryButton: document.querySelector('#radarRetryButton'),
   zoomOutButton: document.querySelector('#zoomOutButton'),
   zoomInButton: document.querySelector('#zoomInButton'),
@@ -76,10 +83,7 @@ document.addEventListener('DOMContentLoaded', init);
 el.refreshButton.addEventListener('click', refreshAll);
 el.zipLocationForm.addEventListener('submit', handleZipLocation);
 el.radarPlayButton.addEventListener('click', toggleRadarAnimation);
-el.radarHdButton.addEventListener('click', function () {
-  switchRadarQuality(!state.radarHd);
-});
-el.radarRetryButton.addEventListener('click', loadRadar);
+el.radarRetryButton.addEventListener('click', function () { loadRadar(); });
 el.zoomOutButton.addEventListener('click', function () {
   if (state.map) state.map.zoomOut(1);
 });
@@ -201,6 +205,11 @@ async function loadForecast(lat, lon) {
     state.gridDataUrl = props.forecastGridData || '';
     state.office = props.cwa || '';
     state.city = formatRelativeLocation(props.relativeLocation);
+    const previousRadarStation = state.radarStation;
+    state.radarStation = normalizeRadarStation(props.radarStation);
+    if (state.radarStation !== previousRadarStation || state.radarSource !== 'nws') {
+      loadRadar(state.radarStation ? 'nws' : 'rainviewer');
+    }
 
     const requests = await Promise.allSettled([
       fetchJson(state.forecastUrl, { signal: signal, retries: 1 }),
@@ -488,7 +497,7 @@ function initMap(lat, lon, zoom) {
     boxZoom: true,
     keyboard: true,
     minZoom: MAP_MIN_ZOOM,
-    maxZoom: MAP_MAX_ZOOM,
+    maxZoom: RAINVIEWER_MAP_MAX_ZOOM,
     zoomSnap: 1,
     zoomDelta: 1,
     fadeAnimation: true,
@@ -501,8 +510,8 @@ function initMap(lat, lon, zoom) {
     'https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}',
     {
       minZoom: MAP_MIN_ZOOM,
-      maxZoom: MAP_MAX_ZOOM,
-      maxNativeZoom: 16,
+      maxZoom: BASEMAP_MAX_ZOOM,
+      maxNativeZoom: BASEMAP_MAX_ZOOM,
       updateWhenIdle: true,
       keepBuffer: 3,
       attribution: 'USGS Topo'
@@ -529,7 +538,7 @@ function initMap(lat, lon, zoom) {
   updateZoomControls();
 }
 
-async function loadRadar() {
+async function loadRadar(preferredSource) {
   if (!state.map) return;
   if (!navigator.onLine) {
     setRadarError('Offline - radar unavailable', false);
@@ -540,55 +549,134 @@ async function loadRadar() {
   if (state.radarController) state.radarController.abort();
   const controller = new AbortController();
   state.radarController = controller;
+  const requestedSource = preferredSource === 'rainviewer'
+    ? 'rainviewer'
+    : (state.radarStation ? 'nws' : 'rainviewer');
   const wasAnimating = isRadarAnimating();
   stopRadarAnimation();
-  setRadarLoading();
+  setRadarLoading(requestedSource);
 
   try {
-    const data = await fetchJson(RADAR_API, {
-      headers: {},
-      signal: controller.signal,
-      timeoutMs: 10000,
-      retries: 2
-    });
+    let radarData;
+    let usedFallback = false;
+    if (requestedSource === 'nws') {
+      try {
+        radarData = await loadNwsRadarData(state.radarStation, controller.signal);
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        console.warn('NWS super-resolution radar unavailable; using RainViewer HD.', error);
+        radarData = await loadRainViewerRadarData(controller.signal);
+        usedFallback = true;
+      }
+    } else {
+      radarData = await loadRainViewerRadarData(controller.signal);
+    }
     if (loadId !== state.radarLoadId) return;
 
-    const host = safeHttpsOrigin(data && data.host);
-    const frames = getRadarFrames(data);
-    if (!host) throw new Error('RainViewer returned an invalid tile host.');
-    if (!frames.length) throw new Error('RainViewer returned no radar frames.');
-
-    state.radarHost = host;
-    state.radarFrames = frames;
-    state.radarFrameIndex = frames.length - 1;
-    state.radarHdFallbackUsed = false;
+    state.radarSource = radarData.source;
+    state.radarHost = radarData.host || '';
+    state.radarWmsUrl = radarData.wmsUrl || '';
+    state.radarLayerName = radarData.layerName || '';
+    state.radarFrames = radarData.frames;
+    state.radarFrameIndex = radarData.frames.length - 1;
+    state.radarFallbackUsed = usedFallback;
     resetRadarLayers();
+    setRadarZoomLimit(radarData.maxZoom);
     setRadarControls(true);
-    setRadarStatus('ready', 'Radar ready');
+    setRadarStatus('ready', radarData.status);
     renderRadarFrame(state.radarFrameIndex);
     preloadRadarNeighbors();
     if (wasAnimating) startRadarAnimation();
+    if (usedFallback) {
+      showToast('NWS super-resolution radar is unavailable, so HD RainViewer is being used.');
+    }
   } catch (error) {
     if (isAbortError(error) || loadId !== state.radarLoadId) return;
     console.error(error);
     resetRadarLayers();
     state.radarHost = '';
+    state.radarWmsUrl = '';
+    state.radarLayerName = '';
     state.radarFrames = [];
     state.radarFrameIndex = 0;
     setRadarError(
       navigator.onLine ? 'Radar service unavailable' : 'Offline - radar unavailable',
       true
     );
-    showToast('RainViewer radar is temporarily unavailable. Use Retry radar to try again.');
+    showToast('Radar services are temporarily unavailable. Use Retry radar to try again.');
   } finally {
     if (state.radarController === controller) state.radarController = null;
   }
 }
 
+async function loadRainViewerRadarData(signal) {
+  const data = await fetchJson(RADAR_API, {
+    headers: {},
+    signal: signal,
+    timeoutMs: 10000,
+    retries: 2
+  });
+  const host = safeHttpsOrigin(data && data.host);
+  const frames = getRadarFrames(data);
+  if (!host) throw new Error('RainViewer returned an invalid tile host.');
+  if (!frames.length) throw new Error('RainViewer returned no radar frames.');
+  return {
+    source: 'rainviewer',
+    host: host,
+    frames: frames,
+    maxZoom: RAINVIEWER_MAP_MAX_ZOOM,
+    status: 'RainViewer HD ready'
+  };
+}
+
+async function loadNwsRadarData(station, signal) {
+  const stationId = normalizeRadarStation(station);
+  if (!stationId) throw new Error('NWS returned no supported radar station.');
+  const stationSlug = stationId.toLowerCase();
+  const layerName = stationSlug + '_sr_bref';
+  const capabilitiesUrl = NWS_RADAR_BASE + stationSlug +
+    '/ows?service=WMS&version=1.3.0&request=GetCapabilities';
+  const xmlText = await fetchText(capabilitiesUrl, {
+    headers: {},
+    signal: signal,
+    timeoutMs: 10000,
+    retries: 1
+  });
+  const xml = new DOMParser().parseFromString(xmlText, 'application/xml');
+  if (xml.querySelector('parsererror')) throw new Error('NWS returned invalid radar metadata.');
+
+  const layer = Array.from(xml.getElementsByTagNameNS('*', 'Layer')).find(function (candidate) {
+    return getDirectChildText(candidate, 'Name') === layerName;
+  });
+  if (!layer) throw new Error('NWS super-resolution radar is unavailable for ' + stationId + '.');
+  const dimension = Array.from(layer.children).find(function (child) {
+    return child.localName === 'Dimension' && child.getAttribute('name') === 'time';
+  });
+  const frames = String(dimension && dimension.textContent || '')
+    .split(',')
+    .map(function (value) {
+      const timeMs = Date.parse(value.trim());
+      return Number.isFinite(timeMs)
+        ? { time: Math.floor(timeMs / 1000), iso: new Date(timeMs).toISOString() }
+        : null;
+    })
+    .filter(Boolean)
+    .slice(-RADAR_FRAME_LIMIT);
+  if (!frames.length) throw new Error('NWS returned no super-resolution radar frames.');
+
+  return {
+    source: 'nws',
+    wmsUrl: NWS_RADAR_BASE + stationSlug + '/wms',
+    layerName: layerName,
+    frames: frames,
+    maxZoom: NWS_RADAR_MAX_ZOOM,
+    status: 'NWS ' + stationId + ' super-res ready'
+  };
+}
+
 function getRadarFrames(data) {
   const past = data && data.radar && Array.isArray(data.radar.past) ? data.radar.past : [];
-  const nowcast = data && data.radar && Array.isArray(data.radar.nowcast) ? data.radar.nowcast : [];
-  return past.concat(nowcast)
+  return past
     .filter(function (frame) {
       return frame && Number.isFinite(Number(frame.time)) && /^\/[A-Za-z0-9/_-]+$/.test(frame.path || '');
     })
@@ -619,32 +707,36 @@ function renderRadarFrame(index) {
   updateRadarProgress();
 
   const frame = state.radarFrames[state.radarFrameIndex];
-  el.radarTimestamp.textContent =
-    'Radar ' + formatUnix(frame.time) + (state.radarHd ? ' HD' : ' SD');
+  el.radarTimestamp.textContent = state.radarSource === 'nws'
+    ? 'Radar ' + formatUnix(frame.time) + ' NWS ' + state.radarStation + ' super-res'
+    : 'Radar ' + formatUnix(frame.time) + ' HD';
   preloadRadarNeighbors();
   pruneRadarCache();
 }
 
 function ensureRadarLayer(index) {
   const frame = state.radarFrames[index];
-  if (!frame || !state.radarHost || !state.map) return null;
-  const key = (state.radarHd ? 'hd:' : 'sd:') + frame.path;
+  if (!frame || !state.map) return null;
+  if (state.radarSource === 'nws' && (!state.radarWmsUrl || !state.radarLayerName)) return null;
+  if (state.radarSource === 'rainviewer' && !state.radarHost) return null;
+  const key = state.radarSource + ':' + (frame.iso || frame.path);
   const cached = state.radarLayers.get(key);
   if (cached) {
     cached.lastUsed = performance.now();
     return cached.layer;
   }
 
-  const tileSize = state.radarHd ? 512 : 256;
-  const layer = L.tileLayer(
-    state.radarHost + frame.path + '/' + tileSize + '/{z}/{x}/{y}/2/1_1.png',
-    {
-      tileSize: tileSize,
-      zoomOffset: tileSize === 512 ? -1 : 0,
+  const layer = state.radarSource === 'nws'
+    ? L.tileLayer.wms(state.radarWmsUrl, {
+      layers: state.radarLayerName,
+      styles: 'radar_reflectivity',
+      format: 'image/png',
+      transparent: true,
+      version: '1.1.1',
+      time: frame.iso,
+      tileSize: 512,
       minZoom: MAP_MIN_ZOOM,
-      maxZoom: MAP_MAX_ZOOM,
-      minNativeZoom: 0,
-      maxNativeZoom: state.radarHd ? RADAR_NATIVE_ZOOM + 1 : RADAR_NATIVE_ZOOM,
+      maxZoom: NWS_RADAR_MAX_ZOOM,
       opacity: 0,
       updateWhenIdle: true,
       updateWhenZooming: false,
@@ -652,14 +744,33 @@ function ensureRadarLayer(index) {
       keepBuffer: 2,
       errorTileUrl: TRANSPARENT_TILE,
       className: 'rainviewer-tile',
-      attribution: state.radarHd ? 'RainViewer HD' : 'RainViewer'
-    }
-  );
+      attribution: 'NOAA/NWS NEXRAD ' + state.radarStation
+    })
+    : L.tileLayer(
+      state.radarHost + frame.path + '/' + RAINVIEWER_TILE_SIZE +
+        '/{z}/{x}/{y}/2/1_1.png',
+      {
+        tileSize: RAINVIEWER_TILE_SIZE,
+        zoomOffset: RAINVIEWER_ZOOM_OFFSET,
+        minZoom: MAP_MIN_ZOOM,
+        maxZoom: RAINVIEWER_MAP_MAX_ZOOM,
+        minNativeZoom: MAP_MIN_ZOOM,
+        maxNativeZoom: RAINVIEWER_MAP_MAX_ZOOM,
+        opacity: 0,
+        updateWhenIdle: true,
+        updateWhenZooming: false,
+        updateInterval: 120,
+        keepBuffer: 2,
+        errorTileUrl: TRANSPARENT_TILE,
+        className: 'rainviewer-tile',
+        attribution: 'RainViewer HD'
+      }
+    );
 
   const entry = { layer: layer, lastUsed: performance.now(), failures: 0, key: key };
   layer.on('tileload', function () {
     entry.failures = 0;
-    if (layer === state.radarLayer) setRadarStatus('ready', 'Radar ready');
+    if (layer === state.radarLayer) setRadarStatus('ready', getRadarReadyStatus());
   });
   layer.on('tileerror', function () {
     handleRadarTileError(entry);
@@ -678,10 +789,10 @@ function handleRadarTileError(entry) {
     return;
   }
 
-  if (state.radarHd && !state.radarHdFallbackUsed) {
-    state.radarHdFallbackUsed = true;
-    showToast('HD radar tiles failed, so the viewer switched to standard quality.');
-    switchRadarQuality(false, false);
+  if (state.radarSource === 'nws' && !state.radarFallbackUsed) {
+    state.radarFallbackUsed = true;
+    showToast('NWS super-resolution tiles failed, so HD RainViewer is being used.');
+    loadRadar('rainviewer');
     return;
   }
 
@@ -765,22 +876,11 @@ function isRadarAnimating() {
   return Boolean(state.radarAnimationFrame);
 }
 
-function switchRadarQuality(useHd, notify) {
-  if (!state.radarFrames.length || state.radarHd === useHd) return;
-  const resume = isRadarAnimating();
-  stopRadarAnimation();
-  state.radarHd = useHd;
-  el.radarHdButton.classList.toggle('active', useHd);
-  el.radarHdButton.textContent = useHd ? 'HD' : 'SD';
-  resetRadarLayers();
-  renderRadarFrame(state.radarFrameIndex);
-  if (resume) startRadarAnimation();
-  if (notify !== false) showToast(useHd ? 'HD radar enabled.' : 'Standard radar enabled.');
-}
-
-function setRadarLoading() {
+function setRadarLoading(source) {
   el.radarTimestamp.textContent = 'Loading radar';
-  setRadarStatus('loading', 'Connecting to RainViewer');
+  setRadarStatus('loading', source === 'nws'
+    ? 'Connecting to NWS super-res radar'
+    : 'Connecting to RainViewer HD');
   el.radarRetryButton.classList.add('hidden');
   setRadarControls(false);
 }
@@ -799,9 +899,14 @@ function setRadarStatus(status, message) {
   el.radarStatus.textContent = message;
 }
 
+function getRadarReadyStatus() {
+  return state.radarSource === 'nws'
+    ? 'NWS ' + state.radarStation + ' super-res ready'
+    : 'RainViewer HD ready';
+}
+
 function setRadarControls(enabled) {
   el.radarPlayButton.disabled = !enabled;
-  el.radarHdButton.disabled = !enabled;
 }
 
 function updateRadarProgress() {
@@ -813,11 +918,19 @@ function updateRadarProgress() {
 function updateZoomControls() {
   if (!state.map) return;
   const zoom = state.map.getZoom();
+  const maxZoom = state.map.getMaxZoom();
   el.zoomOutButton.disabled = zoom <= MAP_MIN_ZOOM;
-  el.zoomInButton.disabled = zoom >= MAP_MAX_ZOOM;
-  el.zoomLevel.value = zoom + ' / ' + MAP_MAX_ZOOM;
-  el.zoomLevel.textContent = zoom + ' / ' + MAP_MAX_ZOOM;
-  el.zoomLevel.setAttribute('aria-label', 'Map zoom ' + zoom + ' of ' + MAP_MAX_ZOOM);
+  el.zoomInButton.disabled = zoom >= maxZoom;
+  el.zoomLevel.value = zoom + ' / ' + maxZoom;
+  el.zoomLevel.textContent = zoom + ' / ' + maxZoom;
+  el.zoomLevel.setAttribute('aria-label', 'Map zoom ' + zoom + ' of ' + maxZoom);
+}
+
+function setRadarZoomLimit(maxZoom) {
+  if (!state.map) return;
+  state.map.setMaxZoom(maxZoom);
+  if (state.map.getZoom() > maxZoom) state.map.setZoom(maxZoom, { animate: false });
+  updateZoomControls();
 }
 
 function bringRadarForward() {
@@ -828,14 +941,16 @@ function bringRadarForward() {
 function centerMap() {
   if (!state.map) return;
   const center = hasLocation() ? [state.lat, state.lon] : [39.8283, -98.5795];
-  const zoom = hasLocation() ? Math.max(state.map.getZoom(), 8) : 4;
+  const zoom = hasLocation()
+    ? Math.min(Math.max(state.map.getZoom(), 8), state.map.getMaxZoom())
+    : 4;
   state.map.setView(center, zoom, { animate: true });
 }
 
 function updateMapPosition(lat, lon) {
   if (!state.map || !state.marker) return;
   state.marker.setLatLng([lat, lon]);
-  state.map.setView([lat, lon], 8, { animate: true });
+  state.map.setView([lat, lon], Math.min(8, state.map.getMaxZoom()), { animate: true });
   window.setTimeout(function () { state.map.invalidateSize(); }, 80);
 }
 
@@ -849,7 +964,27 @@ function handleVisibilityChange() {
   }
 }
 
+function normalizeRadarStation(value) {
+  const station = String(value || '').trim().toUpperCase();
+  return /^[A-Z][A-Z0-9]{3}$/.test(station) ? station : '';
+}
+
+function getDirectChildText(element, localName) {
+  const child = Array.from(element.children).find(function (candidate) {
+    return candidate.localName === localName;
+  });
+  return String(child && child.textContent || '').trim();
+}
+
 async function fetchJson(url, options) {
+  return fetchResource(url, options, 'json');
+}
+
+async function fetchText(url, options) {
+  return fetchResource(url, options, 'text');
+}
+
+async function fetchResource(url, options, responseType) {
   const config = options || {};
   const headers = config.headers === undefined ? NWS_HEADERS : config.headers;
   const timeoutMs = config.timeoutMs || 12000;
@@ -876,7 +1011,7 @@ async function fetchJson(url, options) {
         error.url = url;
         throw error;
       }
-      return await response.json();
+      return responseType === 'text' ? await response.text() : await response.json();
     } catch (error) {
       if (config.signal && config.signal.aborted) throw createAbortError();
       const retryable = timedOut

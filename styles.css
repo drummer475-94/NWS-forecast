@@ -194,6 +194,18 @@ h2 {
   font-weight: 850;
 }
 
+.radar-quality {
+  flex: 0 0 auto;
+  border: 1px solid rgba(74, 222, 128, 0.46);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: rgba(74, 222, 128, 0.14);
+  color: #c9fdd8;
+  font-size: 0.78rem;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
 .source-pill {
   border: 1px solid rgba(74, 222, 128, 0.46);
   background: rgba(74, 222, 128, 0.14);
