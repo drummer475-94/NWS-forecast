@@ -89,7 +89,7 @@ el.zoomInButton.addEventListener('click', function () {
 el.centerMapButton.addEventListener('click', centerMap);
 
 window.addEventListener('offline', function () {
-  setRadarError('Offline â€” radar paused', false);
+  setRadarError('Offline - radar paused', false);
 });
 window.addEventListener('online', function () {
   loadRadar();
@@ -270,8 +270,8 @@ function updateCurrent(period, generatedAt, observation, precipMm) {
   el.currentTemp.textContent = Math.round(period.temperature);
   el.currentSummary.textContent = period.shortForecast || 'Forecast unavailable';
   el.feelsLike.textContent = Number.isFinite(feels)
-    ? Math.round(feels) + 'Â°'
-    : Math.round(period.temperature) + 'Â°';
+    ? Math.round(feels) + '\u00B0'
+    : Math.round(period.temperature) + '\u00B0';
   el.wind.textContent = compactWind(period.windSpeed, period.windDirection);
   el.humidity.textContent = Number.isFinite(humidity) ? Math.round(humidity) + '%' : '--';
   el.precipChance.textContent = formatPercent(getQuantValue(period.probabilityOfPrecipitation));
@@ -365,10 +365,10 @@ function renderHourly(periods) {
     card.innerHTML =
       '<div class="hour-time">' + formatHour(period.startTime) + '</div>' +
       '<img class="hour-icon" src="' + safeUrl(period.icon) + '" alt="">' +
-      '<div class="hour-temp">' + Math.round(period.temperature) + 'Â°</div>' +
+      '<div class="hour-temp">' + Math.round(period.temperature) + '\u00B0</div>' +
       '<div class="hour-feels">Feels ' +
       (Number.isFinite(feels) ? Math.round(feels) : Math.round(period.temperature)) +
-      'Â°</div>';
+      '\u00B0</div>';
     fragment.append(card);
   }
   el.hourlyForecast.append(fragment);
@@ -424,7 +424,7 @@ function renderDaily(periods, hourlyPeriods) {
     card.innerHTML =
       '<img src="' + safeUrl(day.icon) + '" alt="">' +
       '<div><div class="day-name">' + escapeHtml(day.name) + '</div>' +
-      (heatAlert ? '<div class="heat-banner">Feels like up to ' + Math.round(heatAlert) + 'Â°</div>' : '') +
+      (heatAlert ? '<div class="heat-banner">Feels like up to ' + Math.round(heatAlert) + '\u00B0</div>' : '') +
       '<p class="day-summary">' + escapeHtml(day.summary) + '</p></div>' +
       '<div class="day-temp">' + formatHighLow(day) + '</div>';
     fragment.append(card);
@@ -532,7 +532,7 @@ function initMap(lat, lon, zoom) {
 async function loadRadar() {
   if (!state.map) return;
   if (!navigator.onLine) {
-    setRadarError('Offline â€” radar unavailable', false);
+    setRadarError('Offline - radar unavailable', false);
     return;
   }
 
@@ -576,7 +576,7 @@ async function loadRadar() {
     state.radarFrames = [];
     state.radarFrameIndex = 0;
     setRadarError(
-      navigator.onLine ? 'Radar service unavailable' : 'Offline â€” radar unavailable',
+      navigator.onLine ? 'Radar service unavailable' : 'Offline - radar unavailable',
       true
     );
     showToast('RainViewer radar is temporarily unavailable. Use Retry radar to try again.');
@@ -953,7 +953,7 @@ function formatPercent(value) {
 function formatTemperature(value, unitCode) {
   if (!Number.isFinite(value)) return '--';
   const fahrenheit = (unitCode || '').endsWith('degC') ? value * 9 / 5 + 32 : value;
-  return Math.round(fahrenheit) + 'Â°';
+  return Math.round(fahrenheit) + '\u00B0';
 }
 
 function formatDistance(value, unitCode) {
@@ -1009,8 +1009,8 @@ function compactWind(speed, direction) {
 }
 
 function formatHighLow(day) {
-  const high = Number.isFinite(day.high) ? Math.round(day.high) + 'Â°' : '--';
-  const low = Number.isFinite(day.low) ? Math.round(day.low) + 'Â°' : '--';
+  const high = Number.isFinite(day.high) ? Math.round(day.high) + '\u00B0' : '--';
+  const low = Number.isFinite(day.low) ? Math.round(day.low) + '\u00B0' : '--';
   return high + ' / ' + low;
 }
 
