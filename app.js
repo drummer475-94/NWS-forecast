@@ -12,6 +12,9 @@ const RADAR_FRAME_LIMIT = 12;
 const RADAR_FRAME_MS = 650;
 const RADAR_OPACITY = 0.76;
 const RADAR_CACHE_LIMIT = 4;
+const RADAR_CHOICE_LIMIT = 6;
+const RADAR_CHOICE_RADIUS_MILES = 250;
+const RADAR_CHOICE_MINIMUM = 4;
 const TRANSPARENT_TILE = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
 
 const state = {
@@ -32,6 +35,13 @@ const state = {
   radarLayers: new Map(),
   radarSource: 'rainviewer',
   radarStation: '',
+  autoRadarStation: '',
+  radarSelectionMode: 'auto',
+  radarCatalog: [],
+  radarChoices: [],
+  radarStationMarkers: new Map(),
+  radarChoicesController: null,
+  radarChoicesLoadId: 0,
   radarHost: '',
   radarWmsUrl: '',
   radarLayerName: '',
@@ -72,6 +82,9 @@ const el = {
   radarProgress: document.querySelector('#radarProgress'),
   radarPlayButton: document.querySelector('#radarPlayButton'),
   radarRetryButton: document.querySelector('#radarRetryButton'),
+  radarPicker: document.querySelector('#radarPicker'),
+  radarAutoButton: document.querySelector('#radarAutoButton'),
+  radarChoiceStatus: document.querySelector('#radarChoiceStatus'),
   zoomOutButton: document.querySelector('#zoomOutButton'),
   zoomInButton: document.querySelector('#zoomInButton'),
   zoomLevel: document.querySelector('#zoomLevel'),
@@ -84,6 +97,7 @@ el.refreshButton.addEventListener('click', refreshAll);
 el.zipLocationForm.addEventListener('submit', handleZipLocation);
 el.radarPlayButton.addEventListener('click', toggleRadarAnimation);
 el.radarRetryButton.addEventListener('click', function () { loadRadar(); });
+el.radarAutoButton.addEventListener('click', useAutoRadarStation);
 el.zoomOutButton.addEventListener('click', function () {
   if (state.map) state.map.zoomOut(1);
 });
@@ -182,6 +196,7 @@ async function loadForecast(lat, lon) {
     return;
   }
 
+  const previousLocationKey = getLocationKey(state.lat, state.lon);
   if (state.requestController) state.requestController.abort();
   const controller = new AbortController();
   state.requestController = controller;
@@ -189,6 +204,12 @@ async function loadForecast(lat, lon) {
   setLoading(true);
   state.lat = roundCoord(Number(lat));
   state.lon = roundCoord(Number(lon));
+  const isSameLocation = previousLocationKey === getLocationKey(state.lat, state.lon);
+  if (!isSameLocation) {
+    state.radarChoices = [];
+    clearRadarStationMarkers();
+    el.radarPicker.classList.add('hidden');
+  }
 
   try {
     const point = await fetchJson(
@@ -206,7 +227,14 @@ async function loadForecast(lat, lon) {
     state.office = props.cwa || '';
     state.city = formatRelativeLocation(props.relativeLocation);
     const previousRadarStation = state.radarStation;
-    state.radarStation = normalizeRadarStation(props.radarStation);
+    state.autoRadarStation = normalizeRadarStation(props.radarStation);
+    const keepManualSelection = isSameLocation
+      && state.radarSelectionMode === 'manual'
+      && normalizeRadarStation(state.radarStation);
+    if (!keepManualSelection) {
+      state.radarSelectionMode = 'auto';
+      state.radarStation = state.autoRadarStation;
+    }
     if (state.radarStation !== previousRadarStation || state.radarSource !== 'nws') {
       loadRadar(state.radarStation ? 'nws' : 'rainviewer');
     }
@@ -250,6 +278,7 @@ async function loadForecast(lat, lon) {
     renderAlerts((alerts && alerts.features) || []);
     updateLocationLabels(daily.properties.updated);
     updateMapPosition(state.lat, state.lon);
+    loadNearbyRadarChoices(!isSameLocation);
   } catch (error) {
     if (isAbortError(error)) return;
     console.error(error);
@@ -536,6 +565,232 @@ function initMap(lat, lon, zoom) {
 
   state.map.on('zoomend', updateZoomControls);
   updateZoomControls();
+}
+
+async function loadNearbyRadarChoices(fitMap) {
+  if (!hasLocation() || !state.map) return;
+  const loadId = ++state.radarChoicesLoadId;
+  if (state.radarChoicesController) state.radarChoicesController.abort();
+  const controller = new AbortController();
+  state.radarChoicesController = controller;
+  setRadarPickerLoading();
+
+  try {
+    if (!state.radarCatalog.length) {
+      const data = await fetchJson('https://api.weather.gov/radar/stations', {
+        signal: controller.signal,
+        retries: 1
+      });
+      state.radarCatalog = parseRadarCatalog(data);
+    }
+    if (loadId !== state.radarChoicesLoadId) return;
+    state.radarChoices = findNearbyRadars(state.radarCatalog, state.lat, state.lon);
+    renderRadarStationMarkers();
+    updateRadarChoiceUi();
+    if (fitMap) fitMapToRadarChoices();
+  } catch (error) {
+    if (isAbortError(error) || loadId !== state.radarChoicesLoadId) return;
+    console.warn('Nearby NWS radar choices are unavailable.', error);
+    state.radarChoices = [];
+    clearRadarStationMarkers();
+    el.radarPicker.classList.remove('hidden');
+    el.radarChoiceStatus.textContent = 'Nearby radar choices are unavailable; auto-detect is still active.';
+    el.radarAutoButton.disabled = state.radarSelectionMode === 'auto' || !state.autoRadarStation;
+  } finally {
+    if (state.radarChoicesController === controller) state.radarChoicesController = null;
+  }
+}
+
+function parseRadarCatalog(data) {
+  const features = data && Array.isArray(data.features) ? data.features : [];
+  return features.map(function (feature) {
+    const properties = feature && feature.properties;
+    const coordinates = feature && feature.geometry && feature.geometry.coordinates;
+    const id = normalizeRadarStation(properties && properties.id);
+    const lon = Number(coordinates && coordinates[0]);
+    const lat = Number(coordinates && coordinates[1]);
+    if (!id || !Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    if (properties && properties.stationType && properties.stationType !== 'WSR-88D') return null;
+    return {
+      id: id,
+      name: String(properties && properties.name || id),
+      lat: lat,
+      lon: lon
+    };
+  }).filter(Boolean);
+}
+
+function findNearbyRadars(catalog, lat, lon) {
+  const ranked = catalog.map(function (station) {
+    return Object.assign({}, station, {
+      distanceMiles: distanceMiles(lat, lon, station.lat, station.lon)
+    });
+  }).sort(function (a, b) { return a.distanceMiles - b.distanceMiles; });
+
+  const nearby = ranked.filter(function (station) {
+    return station.distanceMiles <= RADAR_CHOICE_RADIUS_MILES;
+  }).slice(0, RADAR_CHOICE_LIMIT);
+  const choices = nearby.length >= RADAR_CHOICE_MINIMUM
+    ? nearby
+    : ranked.slice(0, RADAR_CHOICE_MINIMUM);
+  const autoStation = ranked.find(function (station) {
+    return station.id === state.autoRadarStation;
+  });
+  if (autoStation && !choices.some(function (station) { return station.id === autoStation.id; })) {
+    choices.push(autoStation);
+  }
+  return choices.sort(function (a, b) { return a.distanceMiles - b.distanceMiles; });
+}
+
+function renderRadarStationMarkers() {
+  clearRadarStationMarkers();
+  for (const station of state.radarChoices) {
+    const marker = L.circleMarker([station.lat, station.lon], getRadarStationStyle(station.id))
+      .addTo(state.map);
+    const tooltip = document.createElement('span');
+    tooltip.textContent = getRadarStationLabel(station);
+    marker.bindTooltip(tooltip, {
+      className: 'radar-site-tooltip',
+      direction: 'top',
+      offset: [0, -8]
+    });
+    marker.on('click', function () { selectRadarStation(station.id); });
+    const node = marker.getElement();
+    if (node) {
+      node.setAttribute('tabindex', '0');
+      node.setAttribute('role', 'button');
+      node.setAttribute('aria-label', getRadarStationLabel(station));
+      node.addEventListener('keydown', function (event) {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        selectRadarStation(station.id);
+      });
+    }
+    state.radarStationMarkers.set(station.id, marker);
+  }
+  if (state.marker) state.marker.bringToFront();
+}
+
+function clearRadarStationMarkers() {
+  for (const marker of state.radarStationMarkers.values()) {
+    if (state.map && state.map.hasLayer(marker)) state.map.removeLayer(marker);
+  }
+  state.radarStationMarkers.clear();
+}
+
+function selectRadarStation(stationId) {
+  const station = state.radarChoices.find(function (choice) { return choice.id === stationId; });
+  if (!station) return;
+  const changed = state.radarStation !== station.id || state.radarSelectionMode !== 'manual';
+  state.radarSelectionMode = 'manual';
+  state.radarStation = station.id;
+  updateRadarChoiceUi();
+  if (changed || state.radarSource !== 'nws') loadRadar('nws');
+  showToast('Using NWS ' + station.id + '. Try nearby radar dots to compare coverage.');
+}
+
+function useAutoRadarStation() {
+  if (!state.autoRadarStation) return;
+  const changed = state.radarStation !== state.autoRadarStation || state.radarSelectionMode !== 'auto';
+  state.radarSelectionMode = 'auto';
+  state.radarStation = state.autoRadarStation;
+  updateRadarChoiceUi();
+  if (changed || state.radarSource !== 'nws') loadRadar('nws');
+  showToast('Radar auto-detect restored to NWS ' + state.autoRadarStation + '.');
+}
+
+function updateRadarChoiceUi() {
+  el.radarPicker.classList.remove('hidden');
+  el.radarAutoButton.disabled = state.radarSelectionMode === 'auto' || !state.autoRadarStation;
+  const selected = state.radarChoices.find(function (station) {
+    return station.id === state.radarStation;
+  });
+  const selectionLabel = state.radarSelectionMode === 'manual' ? 'Manual selection' : 'Auto-detect';
+  el.radarChoiceStatus.textContent = selected
+    ? selectionLabel + ': ' + selected.id + ' — ' + selected.name + ', ' +
+      Math.round(selected.distanceMiles) + ' mi away. ' + state.radarChoices.length + ' nearby sites shown.'
+    : selectionLabel + ': ' + (state.radarStation || 'unavailable') + '. ' +
+      state.radarChoices.length + ' nearby sites shown.';
+
+  for (const entry of state.radarStationMarkers.entries()) {
+    const stationId = entry[0];
+    const marker = entry[1];
+    const style = getRadarStationStyle(stationId);
+    marker.setStyle(style);
+    marker.setRadius(style.radius);
+    if (stationId === state.radarStation) marker.bringToFront();
+    const station = state.radarChoices.find(function (choice) { return choice.id === stationId; });
+    const node = marker.getElement();
+    if (node && station) node.setAttribute('aria-label', getRadarStationLabel(station));
+  }
+  if (state.marker) state.marker.bringToFront();
+}
+
+function setRadarPickerLoading() {
+  el.radarPicker.classList.remove('hidden');
+  el.radarChoiceStatus.textContent = 'Finding nearby NWS radars for this location…';
+  el.radarAutoButton.disabled = true;
+}
+
+function getRadarStationStyle(stationId) {
+  if (stationId === state.radarStation) {
+    return {
+      radius: 9,
+      color: '#ffffff',
+      weight: 3,
+      fillColor: '#38bdf8',
+      fillOpacity: 1,
+      className: 'radar-site-dot'
+    };
+  }
+  if (stationId === state.autoRadarStation) {
+    return {
+      radius: 7,
+      color: '#fde68a',
+      weight: 3,
+      fillColor: '#f59e0b',
+      fillOpacity: 0.95,
+      className: 'radar-site-dot'
+    };
+  }
+  return {
+    radius: 6,
+    color: '#ffffff',
+    weight: 2,
+    fillColor: '#8bddff',
+    fillOpacity: 0.92,
+    className: 'radar-site-dot'
+  };
+}
+
+function getRadarStationLabel(station) {
+  let suffix = '';
+  if (station.id === state.radarStation) suffix = ', selected';
+  else if (station.id === state.autoRadarStation) suffix = ', auto-detect choice';
+  return 'NWS ' + station.id + ', ' + station.name + ', ' +
+    Math.round(station.distanceMiles) + ' miles away' + suffix;
+}
+
+function fitMapToRadarChoices() {
+  if (!state.map || !state.radarChoices.length || !hasLocation()) return;
+  const points = [[state.lat, state.lon]].concat(state.radarChoices.map(function (station) {
+    return [station.lat, station.lon];
+  }));
+  state.map.fitBounds(L.latLngBounds(points), {
+    padding: [28, 28],
+    maxZoom: 7,
+    animate: false
+  });
+}
+
+function distanceMiles(lat1, lon1, lat2, lon2) {
+  const toRadians = function (value) { return value * Math.PI / 180; };
+  const latDelta = toRadians(lat2 - lat1);
+  const lonDelta = toRadians(lon2 - lon1);
+  const a = Math.sin(latDelta / 2) * Math.sin(latDelta / 2) +
+    Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) *
+    Math.sin(lonDelta / 2) * Math.sin(lonDelta / 2);
+  return 3958.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 async function loadRadar(preferredSource) {
@@ -1068,6 +1323,12 @@ function isAbortError(error) {
 
 function hasLocation() {
   return Number.isFinite(state.lat) && Number.isFinite(state.lon);
+}
+
+function getLocationKey(lat, lon) {
+  return Number.isFinite(lat) && Number.isFinite(lon)
+    ? roundCoord(lat) + ',' + roundCoord(lon)
+    : '';
 }
 
 function roundCoord(value) {

@@ -536,6 +536,75 @@ h2 {
   gap: 8px;
 }
 
+.radar-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 16px;
+  margin-bottom: 10px;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  border-radius: 8px;
+  padding: 13px 14px;
+  background:
+    linear-gradient(135deg, rgba(56, 189, 248, 0.12), transparent 65%),
+    rgba(6, 13, 20, 0.72);
+}
+
+.radar-picker-copy strong {
+  display: block;
+  margin-bottom: 3px;
+  color: #fff;
+  font-size: 0.92rem;
+}
+
+.radar-picker-copy p,
+.radar-choice-status,
+.radar-choice-legend {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.radar-choice-status {
+  align-self: center;
+  color: #d7f2ff;
+  font-weight: 750;
+}
+
+.radar-choice-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px 12px;
+}
+
+.radar-choice-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.radar-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+}
+
+.radar-dot.selected {
+  background: var(--cyan);
+}
+
+.radar-dot.auto {
+  border-color: #fde68a;
+  background: var(--warning);
+}
+
+.radar-dot.nearby {
+  background: #8bddff;
+}
+
 .segmented,
 .locate-map {
   padding: 0 14px;
@@ -603,6 +672,30 @@ h2 {
 
 .radar-map .leaflet-layer {
   transition: opacity 220ms linear;
+}
+
+.radar-map .radar-site-dot {
+  cursor: pointer;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.9));
+}
+
+.radar-map .radar-site-dot:focus {
+  outline: none;
+  stroke: #fff;
+  stroke-width: 5;
+}
+
+.radar-map .radar-site-tooltip {
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  background: rgba(7, 16, 25, 0.96);
+  color: #fff;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  font-size: 0.76rem;
+  font-weight: 750;
+}
+
+.radar-map .radar-site-tooltip::before {
+  border-top-color: rgba(7, 16, 25, 0.96);
 }
 
 .rainviewer-tile {
@@ -717,6 +810,18 @@ h2 {
 
   .radar-status-actions .locate-map {
     flex: 1 1 0;
+  }
+
+  .radar-picker {
+    grid-template-columns: 1fr;
+  }
+
+  .radar-picker .locate-map {
+    width: 100%;
+  }
+
+  .radar-choice-legend {
+    justify-content: flex-start;
   }
 
   .zoom-button {
