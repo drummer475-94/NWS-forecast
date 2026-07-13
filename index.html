@@ -21,7 +21,7 @@
           <h1>Local Forecast</h1>
         </div>
         <button class="icon-button" id="refreshButton" type="button" aria-label="Refresh forecast">
-          <span aria-hidden="true">↻</span>
+          <span aria-hidden="true">â†»</span>
         </button>
       </header>
 
@@ -37,24 +37,14 @@
 
           <div class="current-grid">
             <div class="current-temp">
-              <span id="currentTemp">--</span>
-              <span class="degree">°</span>
+              <span id="currentTemp">--</span><span class="degree">Â°</span>
             </div>
             <div class="current-details">
               <p id="currentSummary">Waiting for forecast data</p>
               <div class="metric-row">
-                <div>
-                  <span class="metric-label">Feels like</span>
-                  <strong id="feelsLike">--°</strong>
-                </div>
-                <div>
-                  <span class="metric-label">Wind</span>
-                  <strong id="wind">--</strong>
-                </div>
-                <div>
-                  <span class="metric-label">Humidity</span>
-                  <strong id="humidity">--</strong>
-                </div>
+                <div><span class="metric-label">Feels like</span><strong id="feelsLike">--Â°</strong></div>
+                <div><span class="metric-label">Wind</span><strong id="wind">--</strong></div>
+                <div><span class="metric-label">Humidity</span><strong id="humidity">--</strong></div>
               </div>
             </div>
           </div>
@@ -69,79 +59,55 @@
             </form>
 
             <div class="weather-stats" aria-label="Current weather details">
-              <div>
-                <span class="metric-label">Precipitation</span>
-                <strong id="precipChance">--</strong>
-              </div>
-              <div>
-                <span class="metric-label">Dew point</span>
-                <strong id="dewPoint">--</strong>
-              </div>
-              <div>
-                <span class="metric-label">Visibility</span>
-                <strong id="visibility">--</strong>
-              </div>
-              <div>
-                <span class="metric-label">Pressure</span>
-                <strong id="pressure">--</strong>
-              </div>
+              <div><span class="metric-label">Precipitation chance</span><strong id="precipChance">--</strong></div>
+              <div><span class="metric-label">Dew point</span><strong id="dewPoint">--</strong></div>
+              <div><span class="metric-label">Visibility</span><strong id="visibility">--</strong></div>
+              <div><span class="metric-label">Next 24h precipitation</span><strong id="precipTotal">--</strong></div>
             </div>
           </div>
         </section>
 
         <section class="alerts-panel hidden" id="alertsPanel" aria-live="polite">
-          <div class="section-heading">
-            <h2>Active Watches & Warnings</h2>
-            <span id="alertsCount">--</span>
-          </div>
+          <div class="section-heading"><h2>Active Watches &amp; Warnings</h2><span id="alertsCount">--</span></div>
           <div class="alerts-list" id="alertsList"></div>
         </section>
 
         <section class="section-block">
-          <div class="section-heading">
-            <h2>Next 24 Hours</h2>
-            <span id="hourlyCount">--</span>
-          </div>
+          <div class="section-heading"><h2>Next 24 Hours</h2><span id="hourlyCount">--</span></div>
           <div class="hourly-scroll" id="hourlyForecast" aria-label="Hourly forecast"></div>
         </section>
 
         <section class="section-block">
-          <div class="section-heading">
-            <h2>7 Day Forecast</h2>
-            <span id="dailyOffice">--</span>
-          </div>
+          <div class="section-heading"><h2>7 Day Forecast</h2><span id="dailyOffice">--</span></div>
           <div class="daily-list" id="dailyForecast"></div>
         </section>
 
         <section class="section-block radar-block">
           <div class="section-heading">
             <h2>Radar</h2>
-            <span id="radarTimestamp">Loading radar</span>
+            <span id="radarTimestamp" role="status" aria-live="polite">Loading radar</span>
           </div>
 
-          <div class="radar-toolbar radar-statusbar" role="group" aria-label="Radar controls">
-            <span class="radar-source-pill">RainViewer</span>
-            <button class="locate-map" id="centerMapButton" type="button">Center</button>
+          <div class="radar-toolbar radar-statusbar" role="group" aria-label="Radar status and location controls">
+            <span class="radar-source-pill" id="radarStatus" data-state="loading">Connecting to RainViewer</span>
+            <div class="radar-status-actions">
+              <button class="locate-map hidden" id="radarRetryButton" type="button">Retry radar</button>
+              <button class="locate-map" id="centerMapButton" type="button">Center</button>
+            </div>
           </div>
 
           <div class="radar-toolbar" role="group" aria-label="Radar animation and zoom">
-            <button class="segmented" id="radarPlayButton" type="button">Play</button>
-            <button class="segmented active" id="radarHdButton" type="button">HD</button>
-            <button class="zoom-button" id="zoomOutButton" type="button" aria-label="Zoom out">−</button>
+            <button class="segmented" id="radarPlayButton" type="button" disabled>Play</button>
+            <button class="segmented active" id="radarHdButton" type="button" disabled>HD</button>
+            <button class="zoom-button" id="zoomOutButton" type="button" aria-label="Zoom out">âˆ’</button>
+            <output class="zoom-level" id="zoomLevel" aria-live="polite">4Ã—</output>
             <button class="zoom-button" id="zoomInButton" type="button" aria-label="Zoom in">+</button>
           </div>
 
-          <div class="map-toolbar" role="group" aria-label="Map view">
-            <button class="segmented active" id="streetMapButton" type="button">Street</button>
-            <button class="segmented" id="satelliteMapButton" type="button">Satellite</button>
-          </div>
-
-          <div class="radar-timeline" aria-hidden="true">
-            <span id="radarProgress"></span>
-          </div>
+          <div class="radar-timeline" aria-hidden="true"><span id="radarProgress"></span></div>
           <div id="radarMap" class="radar-map" aria-label="Interactive RainViewer radar map"></div>
           <p class="attribution">
-            Forecasts from the National Weather Service. Basemaps from USGS. ZIP lookup from
+            Forecasts from the National Weather Service. Basemap from USGS. ZIP lookup from
             Zippopotam.us. Radar layers from
             <a href="https://www.rainviewer.com/" target="_blank" rel="noreferrer">RainViewer</a>.
           </p>
