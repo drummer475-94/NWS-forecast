@@ -21,7 +21,7 @@
           <h1>Local Forecast</h1>
         </div>
         <button class="icon-button" id="refreshButton" type="button" aria-label="Refresh forecast">
-          <span aria-hidden="true">â†»</span>
+          <span aria-hidden="true">&#8635;</span>
         </button>
       </header>
 
@@ -37,12 +37,12 @@
 
           <div class="current-grid">
             <div class="current-temp">
-              <span id="currentTemp">--</span><span class="degree">Â°</span>
+              <span id="currentTemp">--</span><span class="degree">&deg;</span>
             </div>
             <div class="current-details">
               <p id="currentSummary">Waiting for forecast data</p>
               <div class="metric-row">
-                <div><span class="metric-label">Feels like</span><strong id="feelsLike">--Â°</strong></div>
+                <div><span class="metric-label">Feels like</span><strong id="feelsLike">--&deg;</strong></div>
                 <div><span class="metric-label">Wind</span><strong id="wind">--</strong></div>
                 <div><span class="metric-label">Humidity</span><strong id="humidity">--</strong></div>
               </div>
@@ -99,8 +99,8 @@
           <div class="radar-toolbar" role="group" aria-label="Radar animation and zoom">
             <button class="segmented" id="radarPlayButton" type="button" disabled>Play</button>
             <button class="segmented active" id="radarHdButton" type="button" disabled>HD</button>
-            <button class="zoom-button" id="zoomOutButton" type="button" aria-label="Zoom out">âˆ’</button>
-            <output class="zoom-level" id="zoomLevel" aria-live="polite">4Ã—</output>
+            <button class="zoom-button" id="zoomOutButton" type="button" aria-label="Zoom out">&minus;</button>
+            <output class="zoom-level" id="zoomLevel" aria-live="polite">4 / 18</output>
             <button class="zoom-button" id="zoomInButton" type="button" aria-label="Zoom in">+</button>
           </div>
 
