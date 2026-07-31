@@ -26,6 +26,10 @@ const state = {
   hourlyUrl: '',
   gridDataUrl: '',
   requestController: null,
+  zipController: null,
+  zipLoadId: 0,
+  manualLocationRequested: false,
+  timeZone: '',
   map: null,
   marker: null,
   streetLayer: null,
@@ -107,10 +111,12 @@ el.zoomInButton.addEventListener('click', function () {
 el.centerMapButton.addEventListener('click', centerMap);
 
 window.addEventListener('offline', function () {
+  if (state.radarController) state.radarController.abort();
   setRadarError('Offline - radar paused', false);
 });
 window.addEventListener('online', function () {
   loadRadar();
+  if (hasLocation()) loadForecast(state.lat, state.lon);
 });
 document.addEventListener('visibilitychange', handleVisibilityChange);
 
@@ -132,10 +138,12 @@ function init() {
 
   navigator.geolocation.getCurrentPosition(
     function (position) {
-      loadForecast(position.coords.latitude, position.coords.longitude);
+      if (!state.manualLocationRequested) {
+        loadForecast(position.coords.latitude, position.coords.longitude);
+      }
     },
     function () {
-      if (!hasLocation()) setManualLocationMessage();
+      if (!state.manualLocationRequested && !hasLocation()) setManualLocationMessage();
     },
     { enableHighAccuracy: true, timeout: 12000, maximumAge: 10 * 60 * 1000 }
   );
@@ -165,12 +173,20 @@ async function handleZipLocation(event) {
     return;
   }
 
+  state.manualLocationRequested = true;
+  const loadId = ++state.zipLoadId;
+  if (state.zipController) state.zipController.abort();
+  if (state.requestController) state.requestController.abort();
+  const controller = new AbortController();
+  state.zipController = controller;
   setLoading(true);
   try {
     const data = await fetchJson('https://api.zippopotam.us/us/' + zip, {
       headers: {},
+      signal: controller.signal,
       retries: 1
     });
+    if (loadId !== state.zipLoadId) return;
     const place = data.places && data.places[0];
     const lat = Number.parseFloat(place && place.latitude);
     const lon = Number.parseFloat(place && place.longitude);
@@ -181,17 +197,19 @@ async function handleZipLocation(event) {
     state.city = place['place name'] + ', ' + place['state abbreviation'];
     await loadForecast(lat, lon);
   } catch (error) {
+    if (isAbortError(error) || loadId !== state.zipLoadId) return;
     if (error.status !== 404) console.error(error);
     showToast(error.status === 404
       ? 'ZIP code ' + zip + ' could not be found.'
       : 'ZIP lookup is unavailable. Check your connection and try again.');
   } finally {
-    setLoading(false);
+    if (state.zipController === controller) state.zipController = null;
+    if (loadId === state.zipLoadId) setLoading(false);
   }
 }
 
 async function loadForecast(lat, lon) {
-  if (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lon))) {
+  if (!isValidCoordinates(lat, lon)) {
     showToast('The selected location is invalid.');
     return;
   }
@@ -225,6 +243,7 @@ async function loadForecast(lat, lon) {
     state.hourlyUrl = props.forecastHourly;
     state.gridDataUrl = props.forecastGridData || '';
     state.office = props.cwa || '';
+    state.timeZone = normalizeTimeZone(props.timeZone);
     state.city = formatRelativeLocation(props.relativeLocation);
     const previousRadarStation = state.radarStation;
     state.autoRadarStation = normalizeRadarStation(props.radarStation);
@@ -252,31 +271,49 @@ async function loadForecast(lat, lon) {
         : Promise.resolve(null)
     ]);
 
-    if (requests[0].status === 'rejected') throw requests[0].reason;
-    if (requests[1].status === 'rejected') throw requests[1].reason;
-
-    const daily = requests[0].value;
-    const hourly = requests[1].value;
+    if (signal.aborted) throw createAbortError();
+    const daily = requests[0].status === 'fulfilled' ? requests[0].value : null;
+    const hourly = requests[1].status === 'fulfilled' ? requests[1].value : null;
     const alerts = requests[2].status === 'fulfilled' ? requests[2].value : null;
     const observation = requests[3].status === 'fulfilled' ? requests[3].value : null;
     const gridData = requests[4].status === 'fulfilled' ? requests[4].value : null;
-    const dailyPeriods = daily && daily.properties && daily.properties.periods;
-    const hourlyPeriods = hourly && hourly.properties && hourly.properties.periods;
-    if (!Array.isArray(dailyPeriods) || !Array.isArray(hourlyPeriods) || !hourlyPeriods.length) {
-      throw new Error('NWS returned an incomplete forecast.');
+    const dailyPeriods = daily && daily.properties && Array.isArray(daily.properties.periods)
+      ? daily.properties.periods
+      : [];
+    const hourlyPeriods = hourly && hourly.properties && Array.isArray(hourly.properties.periods)
+      ? hourly.properties.periods
+      : [];
+    const alertFeatures = alerts && Array.isArray(alerts.features) ? alerts.features : null;
+
+    renderAlerts(alertFeatures);
+    if (!dailyPeriods.length && !hourlyPeriods.length) {
+      setCurrentUnavailable(null, NaN);
+      renderHourly([]);
+      renderDaily([], []);
+      updateLocationLabels();
+      updateMapPosition(state.lat, state.lon);
+      loadNearbyRadarChoices(!isSameLocation);
+      throw requests[0].status === 'rejected'
+        ? requests[0].reason
+        : (requests[1].status === 'rejected'
+            ? requests[1].reason
+            : new Error('NWS returned an incomplete forecast.'));
     }
 
     const precipMm = calculate24HourPrecip(gridData && gridData.properties);
-    updateCurrent(
-      hourlyPeriods[0],
-      hourly.properties.generatedAt,
-      observation && observation.properties,
-      precipMm
-    );
+    if (hourlyPeriods.length) {
+      updateCurrent(
+        hourlyPeriods[0],
+        hourly.properties.generatedAt,
+        observation && observation.properties,
+        precipMm
+      );
+    } else {
+      setCurrentUnavailable(observation && observation.properties, precipMm);
+    }
     renderHourly(hourlyPeriods.slice(0, 24));
     renderDaily(dailyPeriods, hourlyPeriods);
-    renderAlerts((alerts && alerts.features) || []);
-    updateLocationLabels(daily.properties.updated);
+    updateLocationLabels(daily && daily.properties && daily.properties.updated);
     updateMapPosition(state.lat, state.lon);
     loadNearbyRadarChoices(!isSameLocation);
   } catch (error) {
@@ -287,7 +324,7 @@ async function loadForecast(lat, lon) {
   } finally {
     if (state.requestController === controller) {
       state.requestController = null;
-      setLoading(false);
+      if (!state.zipController) setLoading(false);
     }
   }
 }
@@ -330,16 +367,51 @@ function updateCurrent(period, generatedAt, observation, precipMm) {
     : 'Updated by NWS';
 }
 
+function setCurrentUnavailable(observation, precipMm) {
+  el.currentTemp.textContent = '--';
+  el.currentSummary.textContent = 'Hourly forecast is temporarily unavailable';
+  el.feelsLike.textContent = '--\u00B0';
+  el.wind.textContent = '--';
+  el.humidity.textContent = '--';
+  el.precipChance.textContent = '--';
+  el.dewPoint.textContent = '--';
+  el.visibility.textContent = formatDistance(
+    getQuantValue(observation && observation.visibility),
+    observation && observation.visibility && observation.visibility.unitCode
+  );
+  el.precipTotal.textContent = formatPrecipTotal(precipMm);
+  el.precipTotal.title = Number.isFinite(precipMm)
+    ? 'Forecast liquid precipitation for the next 24 hours'
+    : 'NWS quantitative precipitation data is unavailable';
+}
+
 async function loadLatestObservation(stationsUrl, signal) {
   if (!stationsUrl) return null;
   const stations = await fetchJson(stationsUrl, { signal: signal, retries: 1 });
-  const first = stations && stations.features && stations.features[0];
-  const stationId = first && first.properties && first.properties.stationIdentifier;
-  if (!stationId) return null;
-  return fetchJson('https://api.weather.gov/stations/' + stationId + '/observations/latest', {
-    signal: signal,
-    retries: 1
-  });
+  const features = stations && Array.isArray(stations.features) ? stations.features : [];
+  let fallback = null;
+
+  for (const feature of features.slice(0, 3)) {
+    const stationId = String(
+      feature && feature.properties && feature.properties.stationIdentifier || ''
+    ).trim().toUpperCase();
+    if (!/^[A-Z0-9]{3,8}$/.test(stationId)) continue;
+
+    try {
+      const observation = await fetchJson(
+        'https://api.weather.gov/stations/' + encodeURIComponent(stationId) + '/observations/latest',
+        { signal: signal, retries: 1 }
+      );
+      if (!fallback) fallback = observation;
+      const visibility = observation && observation.properties && observation.properties.visibility;
+      if (Number.isFinite(getQuantValue(visibility))) return observation;
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      if (!error || error.status !== 404) throw error;
+    }
+  }
+
+  return fallback;
 }
 
 function calculate24HourPrecip(gridProperties, startMs) {
@@ -355,7 +427,7 @@ function calculate24HourPrecip(gridProperties, startMs) {
 
   for (const entry of values) {
     const interval = parseValidTime(entry && entry.validTime);
-    const value = Number(entry && entry.value);
+    const value = getQuantValue(entry && entry.value);
     if (!interval || !Number.isFinite(value)) continue;
 
     const overlap = Math.max(0, Math.min(interval.end, windowEnd) - Math.max(interval.start, windowStart));
@@ -370,6 +442,7 @@ function calculate24HourPrecip(gridProperties, startMs) {
 function parseValidTime(validTime) {
   if (typeof validTime !== 'string') return null;
   const parts = validTime.split('/');
+  if (parts.length !== 2) return null;
   const start = Date.parse(parts[0]);
   const duration = parseIsoDuration(parts[1]);
   if (!Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0) return null;
@@ -378,7 +451,7 @@ function parseValidTime(validTime) {
 
 function parseIsoDuration(value) {
   const match = /^P(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/.exec(value || '');
-  if (!match) return NaN;
+  if (!match || !match.slice(1).some(Boolean)) return NaN;
   const days = Number(match[1] || 0);
   const hours = Number(match[2] || 0);
   const minutes = Number(match[3] || 0);
@@ -413,16 +486,22 @@ function renderHourly(periods) {
 }
 
 function renderAlerts(features) {
+  el.alertsList.replaceChildren();
+  el.alertsPanel.classList.remove('hidden');
+  if (!Array.isArray(features)) {
+    el.alertsCount.textContent = 'Unavailable';
+    el.alertsList.innerHTML = '<div class="empty-state">Active alerts could not be checked. Refresh to try again.</div>';
+    return;
+  }
+
   const alerts = features
-    .map(function (feature) { return feature.properties; })
+    .map(function (feature) { return feature && feature.properties; })
     .filter(function (alert) { return /\b(watch|warning)\b/i.test((alert && alert.event) || ''); })
     .sort(function (a, b) {
       return new Date(a.ends || a.expires || 0) - new Date(b.ends || b.expires || 0);
     });
 
-  el.alertsList.replaceChildren();
   el.alertsCount.textContent = alerts.length ? alerts.length + ' active' : 'None';
-  el.alertsPanel.classList.remove('hidden');
   if (!alerts.length) {
     el.alertsList.innerHTML = '<div class="empty-state">No active watches or warnings for this location.</div>';
     return;
@@ -473,15 +552,11 @@ function renderDaily(periods, hourlyPeriods) {
 function mergeDailyPeriods(periods) {
   const days = new Map();
   for (const period of periods) {
-    const date = new Date(period.startTime);
-    const key = date.toLocaleDateString(undefined, {
-      weekday: 'long',
-      month: 'short',
-      day: 'numeric'
-    });
-    const existing = days.get(key) || {
-      name: key,
-      dateKey: toDateKey(period.startTime),
+    const dateKey = toDateKey(period && period.startTime);
+    if (!dateKey) continue;
+    const existing = days.get(dateKey) || {
+      name: formatForecastDate(dateKey),
+      dateKey: dateKey,
       high: null,
       low: null,
       icon: period.icon,
@@ -495,7 +570,7 @@ function mergeDailyPeriods(periods) {
     } else {
       existing.low = period.temperature;
     }
-    days.set(key, existing);
+    days.set(dateKey, existing);
   }
   return Array.from(days.values());
 }
@@ -510,6 +585,7 @@ function getHeatAlertsByDay(periods) {
     );
     if (!Number.isFinite(feels) || feels <= 90) continue;
     const key = toDateKey(period.startTime);
+    if (!key) continue;
     heatByDay.set(key, Math.max(heatByDay.get(key) || -Infinity, feels));
   }
   return heatByDay;
@@ -577,11 +653,17 @@ async function loadNearbyRadarChoices(fitMap) {
 
   try {
     if (!state.radarCatalog.length) {
-      const data = await fetchJson('https://api.weather.gov/radar/stations', {
-        signal: controller.signal,
-        retries: 1
-      });
+      const data = await fetchJson(
+        'https://api.weather.gov/radar/stations?stationType=WSR-88D',
+        {
+          signal: controller.signal,
+          retries: 1
+        }
+      );
       state.radarCatalog = parseRadarCatalog(data);
+      if (!state.radarCatalog.length) {
+        throw new Error('NWS returned no usable WSR-88D radar stations.');
+      }
     }
     if (loadId !== state.radarChoicesLoadId) return;
     state.radarChoices = findNearbyRadars(state.radarCatalog, state.lat, state.lon);
@@ -1105,6 +1187,7 @@ function startRadarAnimation() {
   }
   el.radarPlayButton.textContent = 'Pause';
   el.radarPlayButton.classList.add('active');
+  el.radarPlayButton.setAttribute('aria-pressed', 'true');
   state.radarNextFrameAt = performance.now() + RADAR_FRAME_MS;
   state.radarAnimationFrame = window.requestAnimationFrame(runRadarAnimation);
 }
@@ -1125,6 +1208,7 @@ function stopRadarAnimation() {
   state.radarNextFrameAt = 0;
   el.radarPlayButton.textContent = 'Play';
   el.radarPlayButton.classList.remove('active');
+  el.radarPlayButton.setAttribute('aria-pressed', 'false');
 }
 
 function isRadarAnimating() {
@@ -1325,9 +1409,21 @@ function hasLocation() {
   return Number.isFinite(state.lat) && Number.isFinite(state.lon);
 }
 
+function isValidCoordinates(lat, lon) {
+  if ((typeof lat !== 'number' && typeof lat !== 'string') ||
+      (typeof lon !== 'number' && typeof lon !== 'string') ||
+      String(lat).trim() === '' || String(lon).trim() === '') {
+    return false;
+  }
+  const latitude = Number(lat);
+  const longitude = Number(lon);
+  return Number.isFinite(latitude) && latitude >= -90 && latitude <= 90 &&
+    Number.isFinite(longitude) && longitude >= -180 && longitude <= 180;
+}
+
 function getLocationKey(lat, lon) {
-  return Number.isFinite(lat) && Number.isFinite(lon)
-    ? roundCoord(lat) + ',' + roundCoord(lon)
+  return isValidCoordinates(lat, lon)
+    ? roundCoord(Number(lat)) + ',' + roundCoord(Number(lon))
     : '';
 }
 
@@ -1335,8 +1431,19 @@ function roundCoord(value) {
   return Math.round(value * 10000) / 10000;
 }
 
+function normalizeTimeZone(value) {
+  const timeZone = String(value || '').trim();
+  if (!timeZone) return '';
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timeZone }).format(0);
+    return timeZone;
+  } catch {
+    return '';
+  }
+}
+
 function getQuantValue(value) {
-  if (!value) return NaN;
+  if (value === null || value === undefined) return NaN;
   if (typeof value === 'number') return value;
   if (typeof value.value === 'number') return value.value;
   return NaN;
@@ -1353,8 +1460,11 @@ function formatTemperature(value, unitCode) {
 }
 
 function formatDistance(value, unitCode) {
-  if (!Number.isFinite(value)) return '--';
-  const miles = (unitCode || '').endsWith('m') ? value / 1609.344 : value;
+  if (!Number.isFinite(value) || value < 0) return '--';
+  const unit = String(unitCode || '');
+  let miles = value;
+  if (unit === 'm' || unit.endsWith(':m')) miles = value / 1609.344;
+  else if (unit === 'km' || unit.endsWith(':km')) miles = value / 1.609344;
   return miles.toFixed(miles < 10 ? 1 : 0) + ' mi';
 }
 
@@ -1393,15 +1503,16 @@ function windChill(tempF, windMph) {
 }
 
 function parseWindMph(text) {
-  const matches = String(text || '').match(/\d+/g);
+  const matches = String(text || '').match(/\d+(?:\.\d+)?/g);
   if (!matches) return 0;
   const values = matches.map(Number);
   return values.reduce(function (sum, value) { return sum + value; }, 0) / values.length;
 }
 
 function compactWind(speed, direction) {
-  if (!speed || speed.toLowerCase() === 'calm') return 'Calm';
-  return direction ? direction + ' ' + speed : speed;
+  const speedText = String(speed || '').trim();
+  if (!speedText || speedText.toLowerCase() === 'calm') return 'Calm';
+  return direction ? direction + ' ' + speedText : speedText;
 }
 
 function formatHighLow(day) {
@@ -1422,15 +1533,38 @@ function updateLocationLabels(updated) {
 }
 
 function toDateKey(value) {
+  const isoDate = /^(\d{4}-\d{2}-\d{2})(?:T|$)/.exec(String(value || ''));
+  if (isoDate) {
+    const parsedIsoDate = new Date(isoDate[1] + 'T12:00:00Z');
+    if (Number.isFinite(parsedIsoDate.getTime()) &&
+        parsedIsoDate.toISOString().slice(0, 10) === isoDate[1]) {
+      return isoDate[1];
+    }
+    return '';
+  }
   const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '';
   return date.getFullYear() + '-' +
     String(date.getMonth() + 1).padStart(2, '0') + '-' +
     String(date.getDate()).padStart(2, '0');
 }
 
+function formatForecastDate(dateKey) {
+  const date = new Date(dateKey + 'T12:00:00Z');
+  if (!Number.isFinite(date.getTime())) return 'Forecast day';
+  return date.toLocaleDateString(undefined, {
+    weekday: 'long',
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC'
+  });
+}
+
 function formatAlertEnds(value) {
   if (!value) return 'Until further notice';
-  return 'Until ' + new Date(value).toLocaleTimeString(undefined, {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return 'End time unavailable';
+  return 'Until ' + formatInForecastTime(date, {
     weekday: 'short',
     hour: 'numeric',
     minute: '2-digit'
@@ -1438,7 +1572,9 @@ function formatAlertEnds(value) {
 }
 
 function formatDateTime(value) {
-  return new Date(value).toLocaleString(undefined, {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return 'time unavailable';
+  return formatInForecastTime(date, {
     weekday: 'short',
     hour: 'numeric',
     minute: '2-digit'
@@ -1446,14 +1582,25 @@ function formatDateTime(value) {
 }
 
 function formatHour(value) {
-  return new Date(value).toLocaleTimeString(undefined, { hour: 'numeric' });
+  const date = new Date(value);
+  return Number.isFinite(date.getTime())
+    ? formatInForecastTime(date, { hour: 'numeric' })
+    : '--';
 }
 
 function formatUnix(value) {
-  return new Date(Number(value) * 1000).toLocaleTimeString(undefined, {
+  const date = new Date(Number(value) * 1000);
+  if (!Number.isFinite(date.getTime())) return '--';
+  return formatInForecastTime(date, {
     hour: 'numeric',
     minute: '2-digit'
   });
+}
+
+function formatInForecastTime(date, options) {
+  const config = Object.assign({}, options);
+  if (state.timeZone) config.timeZone = state.timeZone;
+  return date.toLocaleString(undefined, config);
 }
 
 function safeUrl(value) {
