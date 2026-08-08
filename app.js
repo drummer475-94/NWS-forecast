@@ -17,6 +17,31 @@ const RADAR_CHOICE_RADIUS_MILES = 250;
 const RADAR_CHOICE_MINIMUM = 4;
 const TRANSPARENT_TILE = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
 
+// Tick text for the radar intensity legend. NWS super-resolution base reflectivity
+// stops are read directly off that layer's WMS GetLegendGraphic (verified against
+// https://opengeo.ncep.noaa.gov/geoserver/<station>/ows?service=WMS&request=GetLegendGraphic
+// &format=image/png&layer=<station>_sr_bref&style=radar_reflectivity), so dBZ numbers
+// are safe to print. RainViewer's HD fallback tiles (color scheme "2" in the tile URL)
+// have no published numeric dBZ scale, so that legend stays qualitative on purpose.
+const RADAR_LEGEND_CONTENT = {
+  nws: {
+    caption: 'NWS base reflectivity (dBZ)',
+    ticks: ['-20', '0', '20', '40', '60+'],
+    // The tick marks alone read as bare numbers to a screen reader, so state what
+    // the scale means and which direction is heavier.
+    description: 'Color scale from -20 to over 60 dBZ. Higher values mean heavier precipitation: ' +
+      'around 20 dBZ is light rain, 40 is moderate to heavy rain, and 60 or more indicates ' +
+      'intense storms or hail.'
+  },
+  rainviewer: {
+    caption: 'RainViewer HD intensity (qualitative)',
+    ticks: ['Light', 'Moderate', 'Heavy', 'Extreme'],
+    description: 'Color scale running from light through moderate and heavy to extreme ' +
+      'precipitation. RainViewer does not publish numeric dBZ thresholds for this palette, ' +
+      'so the scale is relative rather than measured.'
+  }
+};
+
 const state = {
   lat: null,
   lon: null,
@@ -74,6 +99,8 @@ const el = {
   dewPoint: document.querySelector('#dewPoint'),
   visibility: document.querySelector('#visibility'),
   precipTotal: document.querySelector('#precipTotal'),
+  sunTimes: document.querySelector('#sunTimes'),
+  hourlyTrend: document.querySelector('#hourlyTrend'),
   hourlyForecast: document.querySelector('#hourlyForecast'),
   hourlyCount: document.querySelector('#hourlyCount'),
   dailyForecast: document.querySelector('#dailyForecast'),
@@ -86,6 +113,10 @@ const el = {
   radarProgress: document.querySelector('#radarProgress'),
   radarPlayButton: document.querySelector('#radarPlayButton'),
   radarRetryButton: document.querySelector('#radarRetryButton'),
+  radarLegend: document.querySelector('#radarLegend'),
+  radarLegendCaption: document.querySelector('#radarLegendCaption'),
+  radarLegendTicks: document.querySelector('#radarLegendTicks'),
+  radarLegendDescription: document.querySelector('#radarLegendDescription'),
   radarPicker: document.querySelector('#radarPicker'),
   radarAutoButton: document.querySelector('#radarAutoButton'),
   radarChoiceStatus: document.querySelector('#radarChoiceStatus'),
@@ -93,12 +124,15 @@ const el = {
   zoomInButton: document.querySelector('#zoomInButton'),
   zoomLevel: document.querySelector('#zoomLevel'),
   centerMapButton: document.querySelector('#centerMapButton'),
+  themeToggleButton: document.querySelector('#themeToggleButton'),
   toast: document.querySelector('#toast')
 };
 
 document.addEventListener('DOMContentLoaded', init);
 el.refreshButton.addEventListener('click', refreshAll);
+el.themeToggleButton.addEventListener('click', toggleTheme);
 el.zipLocationForm.addEventListener('submit', handleZipLocation);
+el.locationLabel.addEventListener('click', toggleLocationDisclosure);
 el.radarPlayButton.addEventListener('click', toggleRadarAnimation);
 el.radarRetryButton.addEventListener('click', function () { loadRadar(); });
 el.radarAutoButton.addEventListener('click', useAutoRadarStation);
@@ -120,7 +154,75 @@ window.addEventListener('online', function () {
 });
 document.addEventListener('visibilitychange', handleVisibilityChange);
 
+const THEME_STORAGE_KEY = 'theme';
+
+function getStoredTheme() {
+  try {
+    const value = window.localStorage.getItem(THEME_STORAGE_KEY);
+    return value === 'light' || value === 'dark' ? value : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function getSystemTheme() {
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+    ? 'light'
+    : 'dark';
+}
+
+function getActiveTheme() {
+  return document.documentElement.getAttribute('data-theme') || getStoredTheme() || getSystemTheme();
+}
+
+function syncThemeButton(theme) {
+  const isLight = theme === 'light';
+  el.themeToggleButton.setAttribute('aria-pressed', String(isLight));
+  el.themeToggleButton.setAttribute('aria-label', isLight ? 'Switch to dark theme' : 'Switch to light theme');
+  const icon = el.themeToggleButton.querySelector('.theme-icon');
+  if (icon) icon.textContent = isLight ? '☾' : '☀';
+}
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  syncThemeButton(theme);
+}
+
+// Only pin data-theme when the user has actually chosen one. Left unpinned, the
+// prefers-color-scheme rules stay live, so the page still follows the OS if it
+// flips while the tab is open.
+function initTheme() {
+  const stored = getStoredTheme();
+  if (stored) {
+    applyTheme(stored);
+    return;
+  }
+
+  document.documentElement.removeAttribute('data-theme');
+  syncThemeButton(getSystemTheme());
+
+  if (!window.matchMedia) return;
+  const query = window.matchMedia('(prefers-color-scheme: light)');
+  const onSystemThemeChange = function () {
+    if (!getStoredTheme()) syncThemeButton(getSystemTheme());
+  };
+  if (query.addEventListener) query.addEventListener('change', onSystemThemeChange);
+  else if (query.addListener) query.addListener(onSystemThemeChange);
+}
+
+function toggleTheme() {
+  const next = getActiveTheme() === 'light' ? 'dark' : 'light';
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, next);
+  } catch (error) {
+    // Storage may be unavailable (private browsing, quota); theme still applies for this session.
+  }
+  applyTheme(next);
+}
+
 function init() {
+  initTheme();
+
   try {
     initMap(39.8283, -98.5795, 4);
     loadRadar();
@@ -149,10 +251,20 @@ function init() {
   );
 }
 
+function setLocationDisclosure(expanded) {
+  el.locationLabel.setAttribute('aria-expanded', String(expanded));
+  el.zipLocationForm.classList.toggle('hidden', !expanded);
+}
+
+function toggleLocationDisclosure() {
+  setLocationDisclosure(el.locationLabel.getAttribute('aria-expanded') !== 'true');
+}
+
 function setManualLocationMessage() {
   showToast('Location permission was not granted. Enter a ZIP code instead.');
   el.locationLabel.textContent = 'Manual location needed';
   el.updatedLabel.textContent = 'Use a US ZIP code to load your local forecast.';
+  setLocationDisclosure(true);
 }
 
 async function refreshAll() {
@@ -202,6 +314,7 @@ async function handleZipLocation(event) {
     showToast(error.status === 404
       ? 'ZIP code ' + zip + ' could not be found.'
       : 'ZIP lookup is unavailable. Check your connection and try again.');
+    setLocationDisclosure(true);
   } finally {
     if (state.zipController === controller) state.zipController = null;
     if (loadId === state.zipLoadId) setLoading(false);
@@ -245,6 +358,7 @@ async function loadForecast(lat, lon) {
     state.office = props.cwa || '';
     state.timeZone = normalizeTimeZone(props.timeZone);
     state.city = formatRelativeLocation(props.relativeLocation);
+    renderSunTimes(state.lat, state.lon);
     const previousRadarStation = state.radarStation;
     state.autoRadarStation = normalizeRadarStation(props.radarStation);
     const keepManualSelection = isSameLocation
@@ -316,11 +430,13 @@ async function loadForecast(lat, lon) {
     updateLocationLabels(daily && daily.properties && daily.properties.updated);
     updateMapPosition(state.lat, state.lon);
     loadNearbyRadarChoices(!isSameLocation);
+    setLocationDisclosure(false);
   } catch (error) {
     if (isAbortError(error)) return;
     console.error(error);
     showToast(friendlyForecastError(error));
     el.updatedLabel.textContent = 'Forecast unavailable. Try again or choose a nearby ZIP code.';
+    setLocationDisclosure(true);
   } finally {
     if (state.requestController === controller) {
       state.requestController = null;
@@ -459,8 +575,135 @@ function parseIsoDuration(value) {
   return (((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1000;
 }
 
+// Sunrise/sunset are not part of the NWS API response, so they are computed locally
+// with NOAA's published low-precision solar position algorithm (see
+// https://gml.noaa.gov/grad/solcalc/solareqns.PDF). This is accurate to roughly a
+// minute for the sunrise/sunset use case and needs no extra network request.
+const SUN_DEG2RAD = Math.PI / 180;
+const SUN_RAD2DEG = 180 / Math.PI;
+
+function normalizeDegrees(value) {
+  const mod = value % 360;
+  return mod < 0 ? mod + 360 : mod;
+}
+
+function dateToJulianDay(components) {
+  // Using noon UTC of the calendar day (rather than the exact moment) keeps this
+  // independent of time-of-day; the Julian century term it feeds only drifts
+  // meaningfully over years, so this has no material effect on accuracy.
+  const ms = Date.UTC(components.year, components.month - 1, components.day, 12, 0, 0);
+  return ms / 86400000 + 2440587.5;
+}
+
+function getLocationTodayComponents(timeZone) {
+  const now = new Date();
+  if (timeZone) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      }).formatToParts(now);
+      const map = {};
+      for (const part of parts) map[part.type] = part.value;
+      const year = Number(map.year);
+      const month = Number(map.month);
+      const day = Number(map.day);
+      if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
+        return { year: year, month: month, day: day };
+      }
+    } catch (error) {
+      // Fall through to the UTC-based date below.
+    }
+  }
+  return { year: now.getUTCFullYear(), month: now.getUTCMonth() + 1, day: now.getUTCDate() };
+}
+
+// Returns { sunrise: Date|null, sunset: Date|null, alwaysUp, alwaysDown } for the
+// given latitude/longitude and calendar-day components, or null for invalid input.
+function calculateSunTimes(lat, lon, dayComponents) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  const jd = dateToJulianDay(dayComponents);
+  const t = (jd - 2451545.0) / 36525.0;
+
+  const meanLongitude = normalizeDegrees(280.46646 + t * (36000.76983 + t * 0.0003032));
+  const meanAnomaly = 357.52911 + t * (35999.05029 - 0.0001537 * t);
+  const meanAnomalyRad = meanAnomaly * SUN_DEG2RAD;
+  const eccentricity = 0.016708634 - t * (0.000042037 + 0.0000001267 * t);
+  const equationOfCenter =
+    Math.sin(meanAnomalyRad) * (1.914602 - t * (0.004817 + 0.000014 * t)) +
+    Math.sin(2 * meanAnomalyRad) * (0.019993 - 0.000101 * t) +
+    Math.sin(3 * meanAnomalyRad) * 0.000289;
+  const trueLongitude = meanLongitude + equationOfCenter;
+  const apparentLongitude = trueLongitude - 0.00569 -
+    0.00478 * Math.sin((125.04 - 1934.136 * t) * SUN_DEG2RAD);
+
+  const meanObliquity = 23 + (26 + (21.448 -
+    t * (46.815 + t * (0.00059 - t * 0.001813))) / 60) / 60;
+  const obliquityCorrection = meanObliquity +
+    0.00256 * Math.cos((125.04 - 1934.136 * t) * SUN_DEG2RAD);
+
+  const declinationRad = Math.asin(
+    Math.sin(obliquityCorrection * SUN_DEG2RAD) * Math.sin(apparentLongitude * SUN_DEG2RAD)
+  );
+
+  const halfObliquityTan = Math.tan((obliquityCorrection / 2) * SUN_DEG2RAD);
+  const y = halfObliquityTan * halfObliquityTan;
+  const equationOfTimeMinutes = 4 * SUN_RAD2DEG * (
+    y * Math.sin(2 * meanLongitude * SUN_DEG2RAD) -
+    2 * eccentricity * Math.sin(meanAnomalyRad) +
+    4 * eccentricity * y * Math.sin(meanAnomalyRad) * Math.cos(2 * meanLongitude * SUN_DEG2RAD) -
+    0.5 * y * y * Math.sin(4 * meanLongitude * SUN_DEG2RAD) -
+    1.25 * eccentricity * eccentricity * Math.sin(2 * meanAnomalyRad)
+  );
+
+  const latRad = lat * SUN_DEG2RAD;
+  const cosHourAngle =
+    Math.cos(90.833 * SUN_DEG2RAD) / (Math.cos(latRad) * Math.cos(declinationRad)) -
+    Math.tan(latRad) * Math.tan(declinationRad);
+
+  if (cosHourAngle > 1) return { sunrise: null, sunset: null, alwaysUp: false, alwaysDown: true };
+  if (cosHourAngle < -1) return { sunrise: null, sunset: null, alwaysUp: true, alwaysDown: false };
+
+  const hourAngleDeg = Math.acos(cosHourAngle) * SUN_RAD2DEG;
+  const solarNoonMinutes = 720 - 4 * lon - equationOfTimeMinutes;
+  const sunriseMinutes = solarNoonMinutes - 4 * hourAngleDeg;
+  const sunsetMinutes = solarNoonMinutes + 4 * hourAngleDeg;
+
+  const dayStartUtcMs = Date.UTC(dayComponents.year, dayComponents.month - 1, dayComponents.day);
+  return {
+    sunrise: new Date(dayStartUtcMs + sunriseMinutes * 60000),
+    sunset: new Date(dayStartUtcMs + sunsetMinutes * 60000),
+    alwaysUp: false,
+    alwaysDown: false
+  };
+}
+
+function formatClockTime(date) {
+  return date instanceof Date && Number.isFinite(date.getTime())
+    ? formatInForecastTime(date, { hour: 'numeric', minute: '2-digit' })
+    : '--';
+}
+
+function formatSunTimes(sunTimes) {
+  if (!sunTimes) return '--';
+  if (sunTimes.alwaysUp) return 'Sun up all day';
+  if (sunTimes.alwaysDown) return 'No sunrise today';
+  if (!sunTimes.sunrise || !sunTimes.sunset) return '--';
+  return formatClockTime(sunTimes.sunrise) + ' / ' + formatClockTime(sunTimes.sunset);
+}
+
+function renderSunTimes(lat, lon) {
+  if (!el.sunTimes) return;
+  const today = getLocationTodayComponents(state.timeZone);
+  el.sunTimes.textContent = formatSunTimes(calculateSunTimes(lat, lon, today));
+}
+
 function renderHourly(periods) {
   el.hourlyCount.textContent = periods.length + ' hours';
+  renderHourlyTrend(periods);
   el.hourlyForecast.replaceChildren();
   if (!periods.length) {
     el.hourlyForecast.innerHTML = '<div class="empty-state">No hourly forecast returned by NWS.</div>';
@@ -471,18 +714,118 @@ function renderHourly(periods) {
   for (const period of periods) {
     const humidity = getQuantValue(period.relativeHumidity);
     const feels = calculateFeelsLike(period.temperature, humidity, period.windSpeed);
+    const tempRounded = Math.round(period.temperature);
+    const feelsRounded = Number.isFinite(feels) ? Math.round(feels) : tempRounded;
+    const precipChance = getQuantValue(period.probabilityOfPrecipitation);
     const card = document.createElement('article');
     card.className = 'hour-card';
     card.innerHTML =
       '<div class="hour-time">' + formatHour(period.startTime) + '</div>' +
-      '<img class="hour-icon" src="' + safeUrl(period.icon) + '" alt="">' +
-      '<div class="hour-temp">' + Math.round(period.temperature) + '\u00B0</div>' +
-      '<div class="hour-feels">Feels ' +
-      (Number.isFinite(feels) ? Math.round(feels) : Math.round(period.temperature)) +
-      '\u00B0</div>';
+      '<img class="hour-icon" src="' + iconUrl(period.icon, 'large') + '" alt="' +
+      escapeHtml(period.shortForecast || '') +
+      '" width="54" height="54" loading="lazy" decoding="async">' +
+      '<div class="hour-temp">' + tempRounded + '\u00B0</div>' +
+      (feelsRounded !== tempRounded
+        ? '<div class="hour-feels">Feels ' + feelsRounded + '\u00B0</div>'
+        : '') +
+      // A 0% (or missing) chance on nearly every card would bury the few hours
+      // that actually matter, so only meaningful precipitation chances are shown.
+      (Number.isFinite(precipChance) && precipChance > 0
+        ? '<div class="hour-precip"><span class="hour-precip-icon" aria-hidden="true">\u{1F4A7}</span>' +
+          formatPercent(precipChance) + '</div>'
+        : '');
     fragment.append(card);
   }
   el.hourlyForecast.append(fragment);
+}
+
+function renderHourlyTrend(periods) {
+  if (!el.hourlyTrend) return;
+  if (!periods || !periods.length) {
+    el.hourlyTrend.innerHTML = '';
+    el.hourlyTrend.classList.add('hidden');
+    return;
+  }
+
+  el.hourlyTrend.classList.remove('hidden');
+  const markup = buildHourlyTrendMarkup(periods);
+  el.hourlyTrend.innerHTML = markup ||
+    '<p class="hourly-trend-empty">Not enough hourly data for a temperature trend.</p>';
+}
+
+// Builds one full-width SVG strip plotting all hourly temperatures at once, rather
+// than trying to keep per-hour marks aligned with the independently-scrolling hour
+// cards below (which would break on scroll/resize). Returns '' when there are fewer
+// than two usable temperature points to draw a line between.
+function buildHourlyTrendMarkup(periods) {
+  const points = periods
+    .map(function (period) {
+      const temp = Number(period && period.temperature);
+      return Number.isFinite(temp) ? { temp: temp, time: period.startTime } : null;
+    })
+    .filter(Boolean);
+  if (points.length < 2) return '';
+
+  const width = 600;
+  const height = 130;
+  const paddingX = 12;
+  const paddingTop = 26;
+  const paddingBottom = 26;
+  const plotWidth = width - paddingX * 2;
+  const plotHeight = height - paddingTop - paddingBottom;
+
+  let minIndex = 0;
+  let maxIndex = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    if (points[i].temp < points[minIndex].temp) minIndex = i;
+    if (points[i].temp > points[maxIndex].temp) maxIndex = i;
+  }
+  const minTemp = points[minIndex].temp;
+  const maxTemp = points[maxIndex].temp;
+  const range = maxTemp - minTemp;
+
+  const coords = points.map(function (point, index) {
+    const x = paddingX + (plotWidth * index) / (points.length - 1);
+    // A flat (all-equal) series would divide by zero; draw it as a level line instead.
+    const y = range > 0
+      ? paddingTop + plotHeight - ((point.temp - minTemp) / range) * plotHeight
+      : paddingTop + plotHeight / 2;
+    return { x: x, y: y };
+  });
+
+  const linePath = coords.map(function (coord, index) {
+    return (index === 0 ? 'M' : 'L') + coord.x.toFixed(1) + ' ' + coord.y.toFixed(1);
+  }).join(' ');
+  const baseline = (height - paddingBottom).toFixed(1);
+  const areaPath = linePath +
+    ' L' + coords[coords.length - 1].x.toFixed(1) + ' ' + baseline +
+    ' L' + coords[0].x.toFixed(1) + ' ' + baseline + ' Z';
+
+  const maxCoord = coords[maxIndex];
+  const minCoord = coords[minIndex];
+  const maxLabelY = Math.max(14, maxCoord.y - 10);
+  const minLabelY = Math.min(height - 6, minCoord.y + 18);
+  const maxTimeLabel = formatHour(points[maxIndex].time);
+  const minTimeLabel = formatHour(points[minIndex].time);
+
+  const ariaLabel = points.length + '-hour temperature trend, low ' + Math.round(minTemp) +
+    '\u00B0 at ' + minTimeLabel + ', high ' + Math.round(maxTemp) + '\u00B0 at ' + maxTimeLabel;
+
+  return '<svg class="hourly-trend-svg" viewBox="0 0 ' + width + ' ' + height +
+    '" preserveAspectRatio="none" role="img" aria-label="' + escapeHtml(ariaLabel) + '">' +
+    '<path class="hourly-trend-area" d="' + areaPath + '"></path>' +
+    '<path class="hourly-trend-line" d="' + linePath + '"></path>' +
+    '<circle class="hourly-trend-dot hourly-trend-dot-max" cx="' + maxCoord.x.toFixed(1) +
+      '" cy="' + maxCoord.y.toFixed(1) + '" r="3.5"></circle>' +
+    '<circle class="hourly-trend-dot hourly-trend-dot-min" cx="' + minCoord.x.toFixed(1) +
+      '" cy="' + minCoord.y.toFixed(1) + '" r="3.5"></circle>' +
+    '<text class="hourly-trend-label hourly-trend-label-max" x="' + maxCoord.x.toFixed(1) +
+      '" y="' + maxLabelY.toFixed(1) + '" text-anchor="middle">' + escapeHtml(Math.round(maxTemp) + '\u00B0') +
+      '</text>' +
+    '<text class="hourly-trend-label hourly-trend-label-min" x="' + minCoord.x.toFixed(1) +
+      '" y="' + minLabelY.toFixed(1) + '" text-anchor="middle">' + escapeHtml(Math.round(minTemp) + '\u00B0') +
+      '</text>' +
+    '</svg>';
 }
 
 function renderAlerts(features) {
@@ -539,7 +882,7 @@ function renderDaily(periods, hourlyPeriods) {
     const card = document.createElement('article');
     card.className = 'day-card';
     card.innerHTML =
-      '<img src="' + safeUrl(day.icon) + '" alt="">' +
+      '<img src="' + iconUrl(day.icon, 'large') + '" alt="" width="58" height="58" loading="lazy" decoding="async">' +
       '<div><div class="day-name">' + escapeHtml(day.name) + '</div>' +
       (heatAlert ? '<div class="heat-banner">Feels like up to ' + Math.round(heatAlert) + '\u00B0</div>' : '') +
       '<p class="day-summary">' + escapeHtml(day.summary) + '</p></div>' +
@@ -1236,6 +1579,26 @@ function setRadarError(message, canRetry) {
 function setRadarStatus(status, message) {
   el.radarStatus.dataset.state = status;
   el.radarStatus.textContent = message;
+  updateRadarLegend(status);
+}
+
+function updateRadarLegend(status) {
+  if (!el.radarLegend) return;
+  if (status !== 'ready' || !state.radarFrames.length) {
+    el.radarLegend.classList.add('hidden');
+    return;
+  }
+  const sourceKey = state.radarSource === 'nws' ? 'nws' : 'rainviewer';
+  const content = RADAR_LEGEND_CONTENT[sourceKey];
+  el.radarLegend.dataset.source = sourceKey;
+  el.radarLegendCaption.textContent = content.caption;
+  el.radarLegendTicks.replaceChildren(...content.ticks.map(function (label) {
+    const tick = document.createElement('span');
+    tick.textContent = label;
+    return tick;
+  }));
+  if (el.radarLegendDescription) el.radarLegendDescription.textContent = content.description;
+  el.radarLegend.classList.remove('hidden');
 }
 
 function getRadarReadyStatus() {
@@ -1515,10 +1878,16 @@ function compactWind(speed, direction) {
   return direction ? direction + ' ' + speedText : speedText;
 }
 
+// Today loses its daytime period once the afternoon passes, and the final day of
+// the range can arrive without a night period. Label the single value that exists
+// instead of pairing it with a meaningless placeholder.
 function formatHighLow(day) {
-  const high = Number.isFinite(day.high) ? Math.round(day.high) + '\u00B0' : '--';
-  const low = Number.isFinite(day.low) ? Math.round(day.low) + '\u00B0' : '--';
-  return high + ' / ' + low;
+  const hasHigh = Number.isFinite(day.high);
+  const hasLow = Number.isFinite(day.low);
+  if (hasHigh && hasLow) return Math.round(day.high) + '\u00B0 / ' + Math.round(day.low) + '\u00B0';
+  if (hasHigh) return 'High ' + Math.round(day.high) + '\u00B0';
+  if (hasLow) return 'Low ' + Math.round(day.low) + '\u00B0';
+  return '--';
 }
 
 function formatRelativeLocation(location) {
@@ -1607,6 +1976,16 @@ function safeUrl(value) {
   try {
     const url = new URL(value);
     return url.protocol === 'https:' ? url.href : '';
+  } catch {
+    return '';
+  }
+}
+
+function iconUrl(value, size) {
+  try {
+    const url = new URL(value);
+    url.searchParams.set('size', size);
+    return safeUrl(url.href);
   } catch {
     return '';
   }
