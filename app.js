@@ -81,7 +81,8 @@ const state = {
   radarNextFrameAt: 0,
   radarPreloadTimer: 0,
   radarResumeOnVisible: false,
-  lastBaseMapErrorAt: 0
+  lastBaseMapErrorAt: 0,
+  hourlyPeriods: []
 };
 
 const el = {
@@ -222,6 +223,7 @@ function toggleTheme() {
 
 function init() {
   initTheme();
+  observeHourlyTrendWidth();
 
   try {
     initMap(39.8283, -98.5795, 4);
@@ -702,6 +704,7 @@ function renderSunTimes(lat, lon) {
 }
 
 function renderHourly(periods) {
+  state.hourlyPeriods = Array.isArray(periods) ? periods : [];
   el.hourlyCount.textContent = periods.length + ' hours';
   renderHourlyTrend(periods);
   el.hourlyForecast.replaceChildren();
@@ -748,83 +751,122 @@ function renderHourlyTrend(periods) {
   }
 
   el.hourlyTrend.classList.remove('hidden');
-  const markup = buildHourlyTrendMarkup(periods);
+  const markup = buildHourlyTrendMarkup(periods, el.hourlyTrend.clientWidth);
   el.hourlyTrend.innerHTML = markup ||
-    '<p class="hourly-trend-empty">Not enough hourly data for a temperature trend.</p>';
+    '<p class="hourly-trend-empty">NWS did not return precipitation chances for these hours.</p>';
 }
 
-// Builds one full-width SVG strip plotting all hourly temperatures at once, rather
+// The chart is drawn at the container's own pixel size instead of being stretched
+// from a fixed viewBox, because a non-uniform stretch distorts the axis text into
+// something unreadable. That makes the width layout-dependent, so redraw on resize.
+function observeHourlyTrendWidth() {
+  if (!el.hourlyTrend || typeof ResizeObserver === 'undefined') return;
+  let lastWidth = el.hourlyTrend.clientWidth;
+  const observer = new ResizeObserver(function (entries) {
+    const width = Math.round(entries[0].contentRect.width);
+    if (!width || width === lastWidth) return;
+    lastWidth = width;
+    if (state.hourlyPeriods.length) renderHourlyTrend(state.hourlyPeriods);
+  });
+  observer.observe(el.hourlyTrend);
+}
+
+// Builds one full-width SVG column chart of hourly precipitation chance, rather
 // than trying to keep per-hour marks aligned with the independently-scrolling hour
-// cards below (which would break on scroll/resize). Returns '' when there are fewer
-// than two usable temperature points to draw a line between.
-function buildHourlyTrendMarkup(periods) {
+// cards below (which would break on scroll/resize). The scale is pinned to 0-100%
+// so hours read against a constant axis instead of a rescaled one. Returns ''
+// when NWS supplied no usable probability values.
+function buildHourlyTrendMarkup(periods, availableWidth) {
   const points = periods
     .map(function (period) {
-      const temp = Number(period && period.temperature);
-      return Number.isFinite(temp) ? { temp: temp, time: period.startTime } : null;
+      const chance = getQuantValue(period && period.probabilityOfPrecipitation);
+      if (!Number.isFinite(chance)) return null;
+      return { chance: Math.min(100, Math.max(0, chance)), time: period.startTime };
     })
     .filter(Boolean);
-  if (points.length < 2) return '';
+  if (!points.length) return '';
 
-  const width = 600;
-  const height = 130;
-  const paddingX = 12;
-  const paddingTop = 26;
-  const paddingBottom = 26;
-  const plotWidth = width - paddingX * 2;
+  const width = Math.max(280, Math.round(availableWidth) || 600);
+  const height = 178;
+  const paddingLeft = 42;
+  const paddingRight = 12;
+  const paddingTop = 20;
+  const paddingBottom = 30;
+  const plotWidth = width - paddingLeft - paddingRight;
   const plotHeight = height - paddingTop - paddingBottom;
+  const baseline = paddingTop + plotHeight;
+  const slot = plotWidth / points.length;
+  const barWidth = Math.max(4, Math.min(30, slot * 0.62));
+  const yFor = function (chance) { return paddingTop + plotHeight * (1 - chance / 100); };
 
-  let minIndex = 0;
-  let maxIndex = 0;
+  let peakIndex = 0;
   for (let i = 1; i < points.length; i += 1) {
-    if (points[i].temp < points[minIndex].temp) minIndex = i;
-    if (points[i].temp > points[maxIndex].temp) maxIndex = i;
+    if (points[i].chance > points[peakIndex].chance) peakIndex = i;
   }
-  const minTemp = points[minIndex].temp;
-  const maxTemp = points[maxIndex].temp;
-  const range = maxTemp - minTemp;
+  const peak = points[peakIndex];
 
-  const coords = points.map(function (point, index) {
-    const x = paddingX + (plotWidth * index) / (points.length - 1);
-    // A flat (all-equal) series would divide by zero; draw it as a level line instead.
-    const y = range > 0
-      ? paddingTop + plotHeight - ((point.temp - minTemp) / range) * plotHeight
-      : paddingTop + plotHeight / 2;
-    return { x: x, y: y };
+  let gridMarkup = '';
+  for (const level of [0, 25, 50, 75, 100]) {
+    const y = yFor(level);
+    gridMarkup += '<line class="hourly-trend-grid" x1="' + paddingLeft + '" y1="' + y.toFixed(1) +
+      '" x2="' + (width - paddingRight) + '" y2="' + y.toFixed(1) + '"></line>' +
+      '<text class="hourly-trend-axis" x="' + (paddingLeft - 8) + '" y="' + (y + 4).toFixed(1) +
+      '" text-anchor="end">' + level + '%</text>';
+  }
+
+  // Thin the hour labels to whatever the available width can show without them
+  // colliding, so the axis stays legible from phone to desktop.
+  const labelStep = Math.max(1, Math.ceil(points.length / Math.max(2, Math.floor(plotWidth / 58))));
+  let barsMarkup = '';
+  let ticksMarkup = '';
+  points.forEach(function (point, index) {
+    const center = paddingLeft + slot * (index + 0.5);
+    const top = yFor(point.chance);
+    if (point.chance > 0) {
+      const barHeight = Math.max(2, baseline - top);
+      barsMarkup += '<rect class="hourly-trend-bar' +
+        (index === peakIndex ? ' hourly-trend-bar-peak' : '') +
+        '" x="' + (center - barWidth / 2).toFixed(1) + '" y="' + top.toFixed(1) +
+        '" width="' + barWidth.toFixed(1) +
+        '" height="' + barHeight.toFixed(1) +
+        // Clamp the radius by height too, so a near-zero bar stays a sliver
+        // instead of rounding itself into a lozenge.
+        '" rx="' + Math.min(4, barWidth / 2, barHeight / 2).toFixed(1) + '"></rect>';
+    }
+    if (index % labelStep === 0) {
+      ticksMarkup += '<text class="hourly-trend-tick" x="' + center.toFixed(1) + '" y="' +
+        (height - 10) + '" text-anchor="middle">' + escapeHtml(formatHour(point.time)) + '</text>';
+    }
   });
 
-  const linePath = coords.map(function (coord, index) {
-    return (index === 0 ? 'M' : 'L') + coord.x.toFixed(1) + ' ' + coord.y.toFixed(1);
-  }).join(' ');
-  const baseline = (height - paddingBottom).toFixed(1);
-  const areaPath = linePath +
-    ' L' + coords[coords.length - 1].x.toFixed(1) + ' ' + baseline +
-    ' L' + coords[0].x.toFixed(1) + ' ' + baseline + ' Z';
+  let peakMarkup = '';
+  if (peak.chance > 0) {
+    // Keep the callout inside the plot when the peak lands on the first or last hour.
+    const peakX = Math.min(
+      width - paddingRight - 16,
+      Math.max(paddingLeft + 16, paddingLeft + slot * (peakIndex + 0.5))
+    );
+    peakMarkup = '<text class="hourly-trend-label" x="' + peakX.toFixed(1) + '" y="' +
+      Math.max(13, yFor(peak.chance) - 8).toFixed(1) + '" text-anchor="middle">' +
+      formatPercent(peak.chance) + '</text>';
+  }
 
-  const maxCoord = coords[maxIndex];
-  const minCoord = coords[minIndex];
-  const maxLabelY = Math.max(14, maxCoord.y - 10);
-  const minLabelY = Math.min(height - 6, minCoord.y + 18);
-  const maxTimeLabel = formatHour(points[maxIndex].time);
-  const minTimeLabel = formatHour(points[minIndex].time);
+  const summary = peak.chance > 0
+    ? 'Peak ' + formatPercent(peak.chance) + ' at ' + formatHour(peak.time)
+    : 'No chance above 0%';
+  const ariaLabel = peak.chance > 0
+    ? points.length + '-hour precipitation chance, peaking at ' + formatPercent(peak.chance) +
+      ' at ' + formatHour(peak.time)
+    : points.length + '-hour precipitation chance, 0% every hour';
 
-  const ariaLabel = points.length + '-hour temperature trend, low ' + Math.round(minTemp) +
-    '\u00B0 at ' + minTimeLabel + ', high ' + Math.round(maxTemp) + '\u00B0 at ' + maxTimeLabel;
-
-  return '<svg class="hourly-trend-svg" viewBox="0 0 ' + width + ' ' + height +
-    '" preserveAspectRatio="none" role="img" aria-label="' + escapeHtml(ariaLabel) + '">' +
-    '<path class="hourly-trend-area" d="' + areaPath + '"></path>' +
-    '<path class="hourly-trend-line" d="' + linePath + '"></path>' +
-    '<circle class="hourly-trend-dot hourly-trend-dot-max" cx="' + maxCoord.x.toFixed(1) +
-      '" cy="' + maxCoord.y.toFixed(1) + '" r="3.5"></circle>' +
-    '<circle class="hourly-trend-dot hourly-trend-dot-min" cx="' + minCoord.x.toFixed(1) +
-      '" cy="' + minCoord.y.toFixed(1) + '" r="3.5"></circle>' +
-    '<text class="hourly-trend-label hourly-trend-label-max" x="' + maxCoord.x.toFixed(1) +
-      '" y="' + maxLabelY.toFixed(1) + '" text-anchor="middle">' + escapeHtml(Math.round(maxTemp) + '\u00B0') +
-      '</text>' +
-    '<text class="hourly-trend-label hourly-trend-label-min" x="' + minCoord.x.toFixed(1) +
-      '" y="' + minLabelY.toFixed(1) + '" text-anchor="middle">' + escapeHtml(Math.round(minTemp) + '\u00B0') +
-      '</text>' +
+  return '<div class="hourly-trend-head">' +
+      '<h3 class="hourly-trend-title">Chance of precipitation</h3>' +
+      '<span class="hourly-trend-summary">' + escapeHtml(summary) + '</span>' +
+    '</div>' +
+    '<svg class="hourly-trend-svg" width="' + width + '" height="' + height +
+    '" viewBox="0 0 ' + width + ' ' + height +
+    '" role="img" aria-label="' + escapeHtml(ariaLabel) + '">' +
+    gridMarkup + barsMarkup + ticksMarkup + peakMarkup +
     '</svg>';
 }
 

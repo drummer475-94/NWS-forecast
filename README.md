@@ -1,6 +1,6 @@
 # NWS Forecast
 
-Mobile-first static weather app using National Weather Service forecasts, observations, alerts, quantitative precipitation data, and local NEXRAD imagery. It includes current conditions, the next 24-hour precipitation total, hourly and seven-day outlooks, and animated radar over a USGS basemap.
+Mobile-first static weather app using National Weather Service forecasts, observations, alerts, quantitative precipitation data, and local NEXRAD imagery. It includes current conditions, the next 24-hour precipitation total, hourly and seven-day outlooks, and animated radar over a USGS basemap. The hourly section leads with a precipitation-chance chart on a fixed 0-100% axis, drawn at the container's own pixel size so its labels stay undistorted at any width.
 
 ## Local use
 
