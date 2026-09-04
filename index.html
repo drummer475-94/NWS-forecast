@@ -13,7 +13,7 @@
     <link rel="preconnect" href="https://tilecache.rainviewer.com">
     <link rel="preconnect" href="https://opengeo.ncep.noaa.gov">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-    <link rel="stylesheet" href="styles.css?v=20260807-9">
+    <link rel="stylesheet" href="styles.css?v=20260904-1">
     <script>
       (function () {
         try {
@@ -29,6 +29,8 @@
   </head>
   <body>
     <a class="skip-link" href="#mainContent">Skip to forecast</a>
+
+    <div id="warningBanner" class="warning-banner hidden" role="alert" aria-atomic="true"></div>
 
     <div class="app-shell">
       <header class="topbar">
@@ -99,7 +101,7 @@
         <section class="alerts-panel hidden" id="alertsPanel" aria-labelledby="alertsHeading" aria-live="polite">
           <div class="section-heading">
             <div class="section-title-group">
-              <h2 id="alertsHeading">Active watches &amp; warnings</h2>
+              <h2 id="alertsHeading" tabindex="-1">Active watches &amp; warnings</h2>
             </div>
             <span class="section-meta" id="alertsCount">--</span>
           </div>
@@ -190,6 +192,6 @@
     <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-    <script src="app.js?v=20260807-9"></script>
+    <script src="app.js?v=20260904-1"></script>
   </body>
 </html>

@@ -54,7 +54,7 @@ function loadAppForTesting() {
     cancelAnimationFrame() {},
     clearTimeout,
     requestAnimationFrame() { return 1; },
-    setTimeout
+    setTimeout(callback, delay) { const timer = setTimeout(callback, delay); timer.unref(); return timer; }
   };
   const sandbox = {
     AbortController,
@@ -89,6 +89,10 @@ function loadAppForTesting() {
       parseValidTime,
       parseWindMph,
       renderAlerts,
+      loadForecast,
+      getThreatWarnings,
+      refreshLocationAlerts,
+      renderWarningBanner,
       safeHttpsOrigin,
       safeUrl,
       state,
@@ -370,4 +374,63 @@ test('fetch helper sends the NWS Accept header and preserves HTTP status', async
     api.fetchJson('https://api.weather.gov/points/0,0'),
     (error) => error.status === 429
   );
+});
+
+function warning(overrides = {}) {
+  return { properties: { event: 'Tornado Warning', status: 'Actual', messageType: 'Alert',
+    effective: new Date(Date.now() - 60000).toISOString(),
+    expires: new Date(Date.now() + 60000).toISOString(), ...overrides } };
+}
+
+test('threat banner only accepts active actual tornado and flash flood warnings', () => {
+  const { api } = loadAppForTesting();
+  const features = [warning(), warning({ event: 'Flash Flood Warning' }),
+    warning({ event: 'Tornado Watch' }), warning({ event: 'Flood Warning' }),
+    warning({ status: 'Test' }), warning({ messageType: 'Cancel' }),
+    warning({ expires: new Date(Date.now() - 1).toISOString() }),
+    warning({ effective: new Date(Date.now() + 60000).toISOString() }),
+    warning({ expires: 'invalid' }), null];
+  assert.deepEqual(Array.from(api.getThreatWarnings(features, Date.now()), a => a.event),
+    ['Tornado Warning', 'Flash Flood Warning']);
+});
+
+test('banner escapes upstream text, retains warnings on failure, and clears on empty results', () => {
+  const { api, elements } = loadAppForTesting();
+  api.renderAlerts([warning({ headline: '<img src=x onerror=alert(1)>' })]);
+  const banner = elements.get('#warningBanner');
+  assert.equal(banner.classList.contains('hidden'), false);
+  assert.match(banner.innerHTML, /&lt;img/);
+  api.renderAlerts(null);
+  assert.match(banner.innerHTML, /Updates unavailable/);
+  api.state.warningFeatures = [warning({ expires: new Date(Date.now() - 1).toISOString() })];
+  api.renderWarningBanner();
+  assert.equal(banner.classList.contains('hidden'), true);
+  api.renderAlerts([]);
+  assert.equal(banner.innerHTML, '');
+});
+
+test('late alert responses for a previous location cannot replace current warnings', async () => {
+  const { api, context, elements } = loadAppForTesting();
+  api.state.lat = 35; api.state.lon = -97;
+  vm.runInContext('globalThis.pendingAlerts = []; fetchJson = function(url) { return new Promise(resolve => pendingAlerts.push({ url, resolve })); };', context);
+  const first = api.refreshLocationAlerts();
+  api.state.lat = 36;
+  const second = api.refreshLocationAlerts();
+  assert.match(context.pendingAlerts[1].url, /point=36,-97$/);
+  context.pendingAlerts[1].resolve({ features: [warning({ event: 'Flash Flood Warning' })] });
+  await second;
+  context.pendingAlerts[0].resolve({ features: [warning()] });
+  await first;
+  assert.match(elements.get('#warningBanner').innerHTML, /Flash Flood Warning/);
+  assert.doesNotMatch(elements.get('#warningBanner').innerHTML, /Tornado Warning/);
+});
+
+test('loading a new location starts alerts even when point metadata fails', async () => {
+  const { api, context, elements } = loadAppForTesting();
+  vm.runInContext("globalThis.alertCoordinates = []; refreshLocationAlerts = function() { alertCoordinates.push([state.lat, state.lon]); }; fetchJson = async function() { throw new Error('unavailable'); };", context);
+  api.renderAlerts([warning()]);
+  await api.loadForecast(35, -97);
+  assert.equal(context.alertCoordinates.length, 1);
+  assert.deepEqual(Array.from(context.alertCoordinates[0]), [35, -97]);
+  assert.equal(elements.get('#warningBanner').classList.contains('hidden'), true);
 });

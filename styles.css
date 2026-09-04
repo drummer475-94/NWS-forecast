@@ -2023,3 +2023,39 @@ a:hover {
     border: 1px solid CanvasText;
   }
 }
+
+/* Keep urgent location warnings visible without covering forecast controls. */
+.warning-banner {
+  position: sticky;
+  top: 0;
+  z-index: 1100;
+  padding: max(12px, env(safe-area-inset-top)) 20px 12px;
+  color: #fff;
+  background: rgba(255, 0, 24, 0.78);
+  border-bottom: 2px solid #ff5260;
+  backdrop-filter: blur(16px) brightness(0.35);
+  animation: warning-pulse 2s ease-in-out infinite;
+  max-height: 40vh;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+.warning-banner-content {
+  max-width: 1200px;
+  margin: 0 auto;
+  display: grid;
+  gap: 5px;
+  font-size: 0.875rem;
+  line-height: 1.4;
+  text-shadow: 0 1px 3px #51000a;
+}
+.warning-banner strong { font-size: 1.125rem; }
+.warning-banner a { color: #fff; text-decoration: underline; width: fit-content; }
+.warning-banner a:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
+#alertsHeading { scroll-margin-top: 42vh; }
+@keyframes warning-pulse {
+  0%, 100% { background-color: rgba(255, 0, 24, 0.78); }
+  50% { background-color: rgba(255, 0, 24, 0.42); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .warning-banner { animation: none; }
+}

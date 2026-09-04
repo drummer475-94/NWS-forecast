@@ -50,6 +50,11 @@ const state = {
   forecastUrl: '',
   hourlyUrl: '',
   gridDataUrl: '',
+  alertController: null,
+  alertTimer: 0,
+  warningTimer: 0,
+  warningFeatures: [],
+  alertsStale: false,
   requestController: null,
   zipController: null,
   zipLoadId: 0,
@@ -106,6 +111,7 @@ const el = {
   hourlyCount: document.querySelector('#hourlyCount'),
   dailyForecast: document.querySelector('#dailyForecast'),
   dailyOffice: document.querySelector('#dailyOffice'),
+  warningBanner: document.querySelector('#warningBanner'),
   alertsPanel: document.querySelector('#alertsPanel'),
   alertsCount: document.querySelector('#alertsCount'),
   alertsList: document.querySelector('#alertsList'),
@@ -339,10 +345,17 @@ async function loadForecast(lat, lon) {
   state.lon = roundCoord(Number(lon));
   const isSameLocation = previousLocationKey === getLocationKey(state.lat, state.lon);
   if (!isSameLocation) {
+    state.warningFeatures = [];
+    state.alertsStale = false;
+    renderWarningBanner();
+    el.alertsList.replaceChildren();
+    el.alertsCount.textContent = 'Checking';
     state.radarChoices = [];
     clearRadarStationMarkers();
     el.radarPicker.classList.add('hidden');
   }
+
+  refreshLocationAlerts();
 
   try {
     const point = await fetchJson(
@@ -377,10 +390,6 @@ async function loadForecast(lat, lon) {
     const requests = await Promise.allSettled([
       fetchJson(state.forecastUrl, { signal: signal, retries: 1 }),
       fetchJson(state.hourlyUrl, { signal: signal, retries: 1 }),
-      fetchJson('https://api.weather.gov/alerts/active?point=' + state.lat + ',' + state.lon, {
-        signal: signal,
-        retries: 1
-      }),
       loadLatestObservation(props.observationStations, signal),
       state.gridDataUrl
         ? fetchJson(state.gridDataUrl, { signal: signal, retries: 1 })
@@ -390,18 +399,15 @@ async function loadForecast(lat, lon) {
     if (signal.aborted) throw createAbortError();
     const daily = requests[0].status === 'fulfilled' ? requests[0].value : null;
     const hourly = requests[1].status === 'fulfilled' ? requests[1].value : null;
-    const alerts = requests[2].status === 'fulfilled' ? requests[2].value : null;
-    const observation = requests[3].status === 'fulfilled' ? requests[3].value : null;
-    const gridData = requests[4].status === 'fulfilled' ? requests[4].value : null;
+    const observation = requests[2].status === 'fulfilled' ? requests[2].value : null;
+    const gridData = requests[3].status === 'fulfilled' ? requests[3].value : null;
     const dailyPeriods = daily && daily.properties && Array.isArray(daily.properties.periods)
       ? daily.properties.periods
       : [];
     const hourlyPeriods = hourly && hourly.properties && Array.isArray(hourly.properties.periods)
       ? hourly.properties.periods
       : [];
-    const alertFeatures = alerts && Array.isArray(alerts.features) ? alerts.features : null;
 
-    renderAlerts(alertFeatures);
     if (!dailyPeriods.length && !hourlyPeriods.length) {
       setCurrentUnavailable(null, NaN);
       renderHourly([]);
@@ -870,7 +876,68 @@ function buildHourlyTrendMarkup(periods, availableWidth) {
     '</svg>';
 }
 
+// The NWS point endpoint scopes warnings to the selected forecast coordinates.
+async function refreshLocationAlerts() {
+  window.clearTimeout(state.alertTimer);
+  if (state.alertController) state.alertController.abort();
+  if (!hasLocation()) return;
+  const controller = new AbortController();
+  state.alertController = controller;
+  const locationKey = getLocationKey(state.lat, state.lon);
+  try {
+    const data = await fetchJson('https://api.weather.gov/alerts/active?point=' + state.lat + ',' + state.lon, {
+      signal: controller.signal, retries: 1
+    });
+    if (controller.signal.aborted || locationKey !== getLocationKey(state.lat, state.lon)) return;
+    renderAlerts(data && Array.isArray(data.features) ? data.features : null);
+  } catch (error) {
+    if (!isAbortError(error) && state.alertController === controller) renderAlerts(null);
+  } finally {
+    if (state.alertController === controller) {
+      state.alertController = null;
+      if (!document.hidden) state.alertTimer = window.setTimeout(refreshLocationAlerts, 60000);
+    }
+  }
+}
+
+function getThreatWarnings(features, now) {
+  return features.map(function (feature) { return feature && feature.properties; })
+    .filter(function (alert) {
+      if (!alert || !/^(Tornado Warning|Flash Flood Warning)$/i.test(alert.event || '')) return false;
+      if (alert.status !== 'Actual' || alert.messageType === 'Cancel') return false;
+      const effective = Date.parse(alert.effective);
+      const expiry = Date.parse(alert.ends || alert.expires);
+      return (!Number.isFinite(effective) || effective <= now) && Number.isFinite(expiry) && expiry > now;
+    })
+    .sort(function (a, b) { return Number(/^Tornado/i.test(b.event)) - Number(/^Tornado/i.test(a.event)); });
+}
+
+function renderWarningBanner() {
+  window.clearTimeout(state.warningTimer);
+  const now = Date.now();
+  const warnings = getThreatWarnings(state.warningFeatures, now);
+  const markup = warnings.length ? '<div class="warning-banner-content"><strong>' +
+    escapeHtml(Array.from(new Set(warnings.map(function (alert) { return alert.event; }))).join(' • ')) +
+    '</strong><span>For your selected location</span>' +
+    warnings.map(function (alert) {
+      return '<span>' + escapeHtml(alert.headline || alert.areaDesc || alert.event) +
+        ' · ' + escapeHtml(formatAlertEnds(alert.ends || alert.expires)) + '</span>';
+    }).join('') +
+    (state.alertsStale ? '<span>Updates unavailable — showing last received warnings. Refresh to retry.</span>' : '') +
+    '<a href="#alertsHeading">View NWS warnings below</a></div>' : '';
+  // Avoid repeating screen reader announcements on unchanged polling results.
+  if (el.warningBanner.innerHTML !== markup) el.warningBanner.innerHTML = markup;
+  el.warningBanner.classList.toggle('hidden', !warnings.length);
+  if (warnings.length) {
+    const nextExpiry = Math.min.apply(null, warnings.map(function (alert) { return Date.parse(alert.ends || alert.expires); }));
+    state.warningTimer = window.setTimeout(renderWarningBanner, Math.min(nextExpiry - now, 2147483647));
+  }
+}
+
 function renderAlerts(features) {
+  state.alertsStale = !Array.isArray(features);
+  if (!state.alertsStale) state.warningFeatures = features;
+  renderWarningBanner();
   el.alertsList.replaceChildren();
   el.alertsPanel.classList.remove('hidden');
   if (!Array.isArray(features)) {
@@ -1699,6 +1766,11 @@ function updateMapPosition(lat, lon) {
 }
 
 function handleVisibilityChange() {
+  if (document.hidden) window.clearTimeout(state.alertTimer);
+  else {
+    renderWarningBanner();
+    refreshLocationAlerts();
+  }
   if (document.hidden && isRadarAnimating()) {
     state.radarResumeOnVisible = true;
     stopRadarAnimation();
