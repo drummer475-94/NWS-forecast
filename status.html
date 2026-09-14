@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0a1420">
+    <meta name="description" content="North Carolina county power-outage totals and active National Weather Service alerts in the Local Weather interface.">
+    <title>North Carolina Status | Local Weather</title>
+    <link rel="preconnect" href="https://api.weather.gov">
+    <link rel="preconnect" href="https://api.zippopotam.us">
+    <link rel="preconnect" href="https://basemap.nationalmap.gov">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+    <link rel="stylesheet" href="styles.css?v=20260913-1">
+    <link rel="stylesheet" href="status.css?v=20260913-1">
+    <script>
+      (function () {
+        try {
+          var stored = window.localStorage.getItem('theme');
+          if (stored === 'light' || stored === 'dark') {
+            document.documentElement.setAttribute('data-theme', stored);
+          }
+        } catch (error) {
+          /* Storage may be unavailable; fall back to the operating-system theme. */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#statusMain">Skip to North Carolina status</a>
+
+    <div id="statusWarningBanner" class="warning-banner hidden" role="alert" aria-atomic="true"></div>
+
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true"><i></i></span>
+          <div>
+            <p class="eyebrow">Official weather and emergency-management data</p>
+            <h1>Local Weather</h1>
+            <p class="app-subtitle">Forecast conditions and North Carolina county status in one clear view.</p>
+          </div>
+        </div>
+        <div class="topbar-tools">
+          <nav class="page-nav" aria-label="Primary navigation">
+            <a class="page-nav-link" href="index.html">Forecast</a>
+            <a class="page-nav-link" href="status.html" aria-current="page">NC Status</a>
+          </nav>
+          <div class="topbar-actions">
+            <button class="icon-button" id="themeToggleButton" type="button" aria-label="Switch to light theme" aria-pressed="false">
+              <span class="theme-icon" aria-hidden="true">&#9728;</span>
+              <span>Theme</span>
+            </button>
+            <button class="icon-button" id="refreshButton" type="button" aria-label="Refresh North Carolina status">
+              <span class="refresh-icon" aria-hidden="true">&#8635;</span>
+              <span>Refresh</span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main id="statusMain" tabindex="-1">
+        <section class="hero-panel status-hero" aria-labelledby="statusHeading">
+          <div class="status-row hero-status">
+            <div class="section-title-group">
+              <p class="eyebrow">North Carolina county dashboard</p>
+              <h2 id="statusHeading">Power outages and weather alerts</h2>
+              <p class="updated-label">Choose a county to see reported customers without power and active NWS alerts.</p>
+            </div>
+            <span class="source-pill status-pill" id="overallStatusPill" data-state="loading">Loading sources</span>
+          </div>
+
+          <div class="status-controls">
+            <form class="status-lookup-card" id="statusZipForm">
+              <label for="statusZip">North Carolina ZIP code</label>
+              <div class="input-row">
+                <input id="statusZip" name="statusZip" type="text" inputmode="numeric" autocomplete="postal-code" placeholder="e.g. 27601" maxlength="5" pattern="[0-9]{5}" aria-describedby="statusZipHelp">
+                <button id="statusZipButton" type="submit">Find county</button>
+              </div>
+              <p class="form-help" id="statusZipHelp">ZIP coordinates are approximate. Confirm the county after lookup.</p>
+            </form>
+
+            <div class="status-location-actions">
+              <button class="locate-map" id="deviceLocationButton" type="button">Use device location</button>
+              <label class="remember-county" for="rememberCounty">
+                <input id="rememberCounty" type="checkbox">
+                <span>Remember this county</span>
+              </label>
+            </div>
+
+            <div class="status-county-picker">
+              <label for="countySelect">Select a county</label>
+              <select id="countySelect"></select>
+            </div>
+          </div>
+
+          <p class="status-message" id="statusMessage" role="status" aria-live="polite">Loading official county status.</p>
+          <aside class="source-notice hidden" id="sourceNotice" role="status"></aside>
+
+          <div class="status-summary" aria-live="polite">
+            <article class="status-summary-location">
+              <p class="metric-label">Selected county</p>
+              <strong id="selectedCountyName">Wake County</strong>
+              <span id="selectedCountyHint">Change the county with ZIP, device location, the map, or the list.</span>
+            </article>
+            <article>
+              <p class="metric-label">Customers without power</p>
+              <strong id="powerTotal">&mdash;</strong>
+              <span id="powerSummary">Waiting for NC Emergency Management.</span>
+            </article>
+            <article>
+              <p class="metric-label">Active weather alerts</p>
+              <strong id="alertTotal">&mdash;</strong>
+              <span id="alertSummary">Waiting for the National Weather Service.</span>
+            </article>
+          </div>
+        </section>
+
+        <section class="section-block status-map-section" aria-labelledby="countyMapHeading">
+          <div class="section-heading status-map-heading">
+            <div class="section-title-group">
+              <p class="eyebrow">Statewide view</p>
+              <h2 id="countyMapHeading">North Carolina counties</h2>
+            </div>
+            <div class="status-layer-toggle" role="group" aria-label="County map data layer">
+              <button class="segmented active" id="powerLayerButton" type="button" aria-pressed="true">Power outages</button>
+              <button class="segmented" id="weatherLayerButton" type="button" aria-pressed="false">Weather alerts</button>
+            </div>
+          </div>
+
+          <div class="status-map-frame">
+            <div id="statusMap" class="status-map" aria-label="Interactive map of North Carolina counties"></div>
+            <div class="status-map-legend" id="mapLegend" aria-label="Power outage map legend"></div>
+            <p class="map-fallback hidden" id="mapFallback" role="status">The county map is unavailable. Use the county list below.</p>
+          </div>
+          <p class="status-map-note" id="mapNote">Map colors show reported customers without power. The county list provides equivalent navigation.</p>
+          <div class="county-list" id="countyList" aria-label="Select a North Carolina county"></div>
+        </section>
+
+        <section class="status-details" aria-label="Selected county details">
+          <article class="section-block" aria-labelledby="powerDetailsHeading">
+            <div class="section-heading">
+              <div class="section-title-group">
+                <p class="eyebrow">Power details</p>
+                <h2 id="powerDetailsHeading">Wake County</h2>
+              </div>
+              <span class="section-meta" id="powerFreshness">Unavailable</span>
+            </div>
+            <p class="status-primary-metric"><strong id="powerDetailTotal">&mdash;</strong><span>customers reported without power</span></p>
+            <p class="status-detail-copy" id="powerDetailCopy">Current county outage information is loading.</p>
+            <a class="status-source-link" href="https://www.ncdps.gov/power-outages" target="_blank" rel="noreferrer">NC DPS outage information</a>
+          </article>
+
+          <article class="section-block" id="weatherDetails" aria-labelledby="weatherDetailsHeading">
+            <div class="section-heading">
+              <div class="section-title-group">
+                <p class="eyebrow">Weather details</p>
+                <h2 id="weatherDetailsHeading">Official NWS alerts</h2>
+              </div>
+              <span class="section-meta" id="weatherFreshness">Unavailable</span>
+            </div>
+            <div class="status-alert-list" id="statusAlertList"></div>
+          </article>
+        </section>
+
+        <section class="section-block status-method" aria-labelledby="statusSourcesHeading">
+          <div class="section-heading">
+            <div class="section-title-group">
+              <p class="eyebrow">Sources and privacy</p>
+              <h2 id="statusSourcesHeading">What this dashboard reports</h2>
+            </div>
+          </div>
+          <div class="status-source-grid">
+            <p id="powerSourceStatus">NC Emergency Management status is loading.</p>
+            <p id="weatherSourceStatus">National Weather Service status is loading.</p>
+            <p>ZIP lookup sends the ZIP code to Zippopotam.us. Device coordinates stay in this browser and are matched against the bundled county boundaries; only a county FIPS is stored when “Remember this county” is selected.</p>
+            <p>This page is informational. It does not replace Wireless Emergency Alerts, utility reporting, official agency instructions, or emergency services.</p>
+          </div>
+          <p class="status-attribution">County status features adapted from <a href="https://github.com/drummer475-94/NetPulse" target="_blank" rel="noreferrer">NetPulse</a>. Forecasts and alerts come from the National Weather Service; outage totals come from North Carolina Emergency Management; county boundaries come from the U.S. Census Bureau; basemap tiles come from USGS.</p>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="status.js?v=20260913-1"></script>
+  </body>
+</html>

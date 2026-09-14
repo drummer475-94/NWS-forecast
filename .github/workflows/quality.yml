@@ -19,6 +19,11 @@ jobs:
         with:
           node-version: 24
       - name: Check JavaScript syntax
-        run: node --check app.js
+        run: |
+          node --check app.js
+          node --check status.js
+          node --check scripts/nc-status.mjs
+          node --check scripts/refresh-nc-status.mjs
+          node --check scripts/verify-nc-status.mjs
       - name: Run regression tests
         run: node --test

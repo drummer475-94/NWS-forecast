@@ -13,7 +13,7 @@
     <link rel="preconnect" href="https://tilecache.rainviewer.com">
     <link rel="preconnect" href="https://opengeo.ncep.noaa.gov">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-    <link rel="stylesheet" href="styles.css?v=20260904-1">
+    <link rel="stylesheet" href="styles.css?v=20260913-1">
     <script>
       (function () {
         try {
@@ -42,15 +42,21 @@
             <p class="app-subtitle">Your forecast, alerts, and live radar in one clear view.</p>
           </div>
         </div>
-        <div class="topbar-actions">
-          <button class="icon-button" id="themeToggleButton" type="button" aria-label="Switch to light theme" aria-pressed="false">
-            <span class="theme-icon" aria-hidden="true">&#9728;</span>
-            <span>Theme</span>
-          </button>
-          <button class="icon-button" id="refreshButton" type="button" aria-label="Refresh forecast">
-            <span class="refresh-icon" aria-hidden="true">&#8635;</span>
-            <span>Refresh</span>
-          </button>
+        <div class="topbar-tools">
+          <nav class="page-nav" aria-label="Primary navigation">
+            <a class="page-nav-link" href="index.html" aria-current="page">Forecast</a>
+            <a class="page-nav-link" href="status.html">NC Status</a>
+          </nav>
+          <div class="topbar-actions">
+            <button class="icon-button" id="themeToggleButton" type="button" aria-label="Switch to light theme" aria-pressed="false">
+              <span class="theme-icon" aria-hidden="true">&#9728;</span>
+              <span>Theme</span>
+            </button>
+            <button class="icon-button" id="refreshButton" type="button" aria-label="Refresh forecast">
+              <span class="refresh-icon" aria-hidden="true">&#8635;</span>
+              <span>Refresh</span>
+            </button>
+          </div>
         </div>
       </header>
 
@@ -192,6 +198,6 @@
     <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-    <script src="app.js?v=20260904-1"></script>
+    <script src="app.js?v=20260913-1"></script>
   </body>
 </html>
