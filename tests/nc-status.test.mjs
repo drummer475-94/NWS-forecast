@@ -27,6 +27,18 @@ function powerPayload() {
   };
 }
 
+function powerHtml() {
+  return `
+    <table>
+      <tbody class="tableCountyLabel"><tr><td>County</td><td># Outages</td></tr></tbody>
+      <tbody class="tableCountyContent">
+        <tr><td>Wake County</td><td><div>42</div></td></tr>
+        <tr><td>New Hanover</td><td><div>1,503</div></td></tr>
+      </tbody>
+      <tbody class="tableCountyLabel"><tr><td>Statewide Outages</td><td><div>1,545</div></td></tr></tbody>
+    </table>`;
+}
+
 function activeAlertPayload() {
   return {
     features: [{
@@ -62,6 +74,21 @@ test("NCEM normalization maps county names to FIPS and validates counts", () => 
   assert.throws(() => parseNcem({ features: [{ attributes: { CountyName: "UNKNOWN", Outages: 1 } }] }, countyCatalog), /power-schema/);
 });
 
+test("NCEM HTML normalization fills omitted zero-outage counties", () => {
+  const result = parseNcem(powerHtml(), countyCatalog);
+  assert.equal(result.length, 100);
+  assert.deepEqual(result.find((county) => county.countyName === "Wake"), {
+    countyFips: "37183",
+    countyName: "Wake",
+    customersOut: 42,
+  });
+  assert.deepEqual(result.find((county) => county.countyName === "Alamance"), {
+    countyFips: "37001",
+    countyName: "Alamance",
+    customersOut: 0,
+  });
+});
+
 test("NWS normalization retains active alerts and filters expired or cancelled records", () => {
   const payload = activeAlertPayload();
   payload.features.push({
@@ -84,7 +111,8 @@ test("snapshot builder sends identifying NWS headers and produces a complete con
     requests.push({ url, options });
     return {
       ok: true,
-      async json() { return url === NCEM_POWER_URL ? powerPayload() : activeAlertPayload(); },
+      async text() { return url === NCEM_POWER_URL ? powerHtml() : JSON.stringify(activeAlertPayload()); },
+      async json() { return activeAlertPayload(); },
     };
   };
   const snapshot = await buildSnapshot({
@@ -106,7 +134,8 @@ test("snapshot builder sends identifying NWS headers and produces a complete con
 test("deployment validation rejects incomplete or corrupt snapshots", async () => {
   const fetchImpl = async (url) => ({
     ok: true,
-    async json() { return url === NCEM_POWER_URL ? powerPayload() : { features: [] }; },
+    async text() { return url === NCEM_POWER_URL ? powerHtml() : JSON.stringify({ features: [] }); },
+    async json() { return { features: [] }; },
   });
   const snapshot = await buildSnapshot({
     fetchImpl,

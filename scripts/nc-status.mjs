@@ -1,5 +1,5 @@
 export const NWS_ALERTS_URL = "https://api.weather.gov/alerts/active?area=NC";
-export const NCEM_POWER_URL = "https://spartagis.ncem.org/arcgis/rest/services/Public/ReadyNC_PowerOutages/MapServer/0/query?where=1%3D1&outFields=*&returnGeometry=false&f=json";
+export const NCEM_POWER_URL = "https://fusion.ncsparta.gov/ReadyNC_PowerOutageAPI/html";
 
 const FRESHNESS_VALUES = new Set(["fresh", "stale", "unavailable"]);
 const ALERT_SEVERITIES = new Set(["Extreme", "Severe", "Moderate", "Minor", "Unknown"]);
@@ -33,6 +33,67 @@ function normalizeCountyName(value) {
   return cleanText(value).replace(/\s+COUNTY$/i, "").toUpperCase();
 }
 
+function decodeHtml(value) {
+  return value
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([\da-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)));
+}
+
+function htmlText(value) {
+  return decodeHtml(value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+}
+
+function parseOutageCount(value) {
+  const normalized = htmlText(value).replace(/,/g, "");
+  if (!/^\d+$/.test(normalized)) return undefined;
+  const parsed = Number(normalized);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function parseNcemHtml(input, countyCatalog) {
+  const countyByName = new Map(countyCatalog.map((county) => [normalizeCountyName(county.name), county]));
+  const counts = new Map();
+  let sawHeader = false;
+  let statewideTotal;
+
+  for (const rowMatch of input.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
+    const cells = Array.from(rowMatch[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi), (match) => htmlText(match[1]));
+    if (cells.length < 2) continue;
+
+    const label = cells[0];
+    const labelKey = normalizeCountyName(label);
+    if (labelKey === "COUNTY") {
+      sawHeader = true;
+      continue;
+    }
+    if (/^STATEWIDE OUTAGES$/i.test(label)) {
+      statewideTotal = parseOutageCount(cells[1]);
+      if (statewideTotal === undefined) throw new Error("power-schema");
+      continue;
+    }
+
+    const county = countyByName.get(labelKey);
+    if (!county) continue;
+    const customersOut = parseOutageCount(cells[1]);
+    if (customersOut === undefined || counts.has(county.fips)) throw new Error("power-schema");
+    counts.set(county.fips, customersOut);
+  }
+
+  if (!sawHeader || statewideTotal === undefined) throw new Error("power-schema");
+  const total = Array.from(counts.values()).reduce((sum, value) => sum + value, 0);
+  if (total !== statewideTotal) throw new Error("power-schema");
+
+  return countyCatalog.map((county) => ({
+    countyFips: county.fips,
+    countyName: county.name,
+    customersOut: counts.get(county.fips) ?? 0,
+  }));
+}
+
 export function countyCatalogFromGeoJson(input) {
   if (!input || input.type !== "FeatureCollection" || !Array.isArray(input.features)) {
     throw new Error("county-geometry-schema");
@@ -58,9 +119,12 @@ export function countyCatalogFromGeoJson(input) {
 }
 
 export function parseNcem(input, countyCatalog) {
+  if (!Array.isArray(countyCatalog) || !countyCatalog.length) throw new Error("county-catalog-missing");
+
+  if (typeof input === "string") return parseNcemHtml(input, countyCatalog);
+
   const features = input?.features;
   if (!Array.isArray(features)) throw new Error("power-schema");
-  if (!Array.isArray(countyCatalog) || !countyCatalog.length) throw new Error("county-catalog-missing");
 
   const countyByName = new Map(countyCatalog.map((county) => [normalizeCountyName(county.name), county]));
   return features.map((feature) => {
