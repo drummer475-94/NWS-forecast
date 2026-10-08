@@ -14,14 +14,14 @@ permissions:
 
 concurrency:
   group: "pages"
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  refresh:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,9 +29,46 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
+      - name: Check previous published update
+        continue-on-error: true
+        run: node scripts/check-nc-status.mjs
       - name: Refresh North Carolina status snapshot
         run: node scripts/refresh-nc-status.mjs
       - name: Validate North Carolina status snapshot
+        run: node scripts/verify-nc-status.mjs
+      - name: Save validated snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: nc-status-snapshot
+          path: data/nc-status.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Report refresh failure
+        if: failure()
+        run: |
+          echo "::error::Snapshot preparation failed. Pages publication is blocked; the previous valid deployment remains available."
+          echo "Snapshot preparation failed. The previous valid Pages deployment remains available, with age-based stale/unavailable labels." >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: refresh
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Restore this run's validated snapshot
+        uses: actions/download-artifact@v4
+        with:
+          name: nc-status-snapshot
+          path: data
+      - name: Recheck snapshot age before publication
         run: node scripts/verify-nc-status.mjs
       - name: Setup Pages
         uses: actions/configure-pages@v5
@@ -42,3 +79,5 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+      - name: Verify published snapshot
+        run: node scripts/check-nc-status.mjs

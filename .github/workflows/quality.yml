@@ -25,5 +25,6 @@ jobs:
           node --check scripts/nc-status.mjs
           node --check scripts/refresh-nc-status.mjs
           node --check scripts/verify-nc-status.mjs
+          node --check scripts/check-nc-status.mjs
       - name: Run regression tests
         run: node --test

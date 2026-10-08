@@ -27,12 +27,19 @@ node --check status.js
 node --check scripts/nc-status.mjs
 node --check scripts/refresh-nc-status.mjs
 node --check scripts/verify-nc-status.mjs
+node --check scripts/check-nc-status.mjs
 node --test
 ```
 
 ## NC Status data flow
 
-The Pages deployment runs twice hourly and replaces `data/nc-status.json` only after both upstream responses produce a complete, validated snapshot. Validation requires all 100 NC counties, unique valid FIPS values, nonnegative integer outage totals, valid source timestamps, and structurally valid NWS alerts. If refresh or validation fails, deployment stops and the previous valid Pages deployment remains available.
+The Pages workflow requests refreshes twice hourly at minutes 17 and 47 UTC. GitHub Actions scheduling is best effort: executions may be delayed or dropped, and a cron expression does not guarantee updates every 30 minutes. See [GitHub's schedule limitations](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
+
+Snapshot preparation runs in a separate job before Pages publication. It replaces `data/nc-status.json` atomically only after both upstream responses produce a complete, validated snapshot. Validation requires all 100 NC counties, unique valid FIPS values, nonnegative integer outage totals, valid source timestamps, and structurally valid NWS alerts. The publication job downloads only this run's validated snapshot and rejects generation/source-success timestamps older than five minutes, regardless of stored freshness labels. If refresh, validation, or the age check fails, deployment stops and the previous valid Pages deployment remains available. Source-success times record retrieval, not an independently verified provider observation time.
+
+Requests have a 20-second timeout per attempt and at most three attempts for network/body-read errors and HTTP 408, 429, or 5xx responses. Retries wait one then two seconds, honoring longer `Retry-After` delays up to 30 seconds. Longer provider delays stop the refresh rather than retrying early. Other HTTP errors and invalid weather/outage schemas fail immediately. Logs identify the URL, attempt count, and error; workflow failures include a preservation notice in the run summary.
+
+Pages concurrency does not cancel an active run when another trigger arrives. GitHub may still replace a pending run, and concurrency does not promise a FIFO queue. Snapshot preparation and publication remain in one workflow because Pages publishes a complete site artifact; putting scheduled data in a separate store would require additional persistence and client behavior without fixing GitHub's scheduler.
 
 To build and verify a snapshot locally:
 
@@ -40,6 +47,21 @@ To build and verify a snapshot locally:
 node scripts/refresh-nc-status.mjs
 node scripts/verify-nc-status.mjs
 ```
+
+### Refresh monitoring and investigation
+
+`monitor-status.yml` requests independent checks twice hourly at minutes 8 and 38 UTC and supports manual dispatch. The deployment also checks the previous published snapshot before refreshing and verifies the published snapshot afterward. A pre-refresh monitoring failure is reported but permits recovery; preparation failure blocks publication. A post-publication monitoring failure reports a verification problem and does not roll back a completed deployment.
+
+The monitor fetches the actual Pages JSON with cache bypassing, validates its structure, and checks the oldest generation/source-success timestamp. More than 45 minutes is overdue, reported as a failed monitor run with an error annotation and summary. An HTTP, network, or validation failure is reported as unverifiable, never as a healthy update. Enable GitHub Actions failure notifications for this workflow. To check locally or from an independently scheduled external monitor, run:
+
+```sh
+node scripts/check-nc-status.mjs
+# Set NWS_NC_STATUS_URL if Pages uses a different URL or custom domain.
+```
+
+Exit status is zero for a valid snapshot within the 45-minute window and nonzero for overdue or unverifiable data. Monitoring on GitHub is also best effort: it can detect a gap once it runs, but cannot guarantee a timely alert while GitHub scheduling is delayed. An external scheduler running this check is required for independently timed detection. No external monitoring service is configured by this change. The monitor's 45-minute threshold checks the intended snapshot cadence; the browser's stricter weather-alert freshness window still applies.
+
+Investigation on 2026-10-08 inspected all 184 available repository workflow runs: 135 scheduled runs (122 successes, 13 failures), with no scheduled cancellations or skipped run conclusions. Eight canceled runs were push-triggered. There are no run records for many expected cron slots; the API cannot distinguish dropped triggers from uncreated/delayed triggers. For example, successful scheduled runs on October 5 were [09:01 UTC](https://github.com/drummer475-94/NWS-forecast/actions/runs/37287271804) and [18:25 UTC](https://github.com/drummer475-94/NWS-forecast/actions/runs/37355802179), a 9-hour 24-minute gap. On October 8, [the 15:34 UTC run](https://github.com/drummer475-94/NWS-forecast/actions/runs/37801888299) followed the 07:58 UTC run by 7 hours 36 minutes, yet its job started six seconds after creation and finished in 17 seconds. These sampled gaps occur before workflow execution, rather than within long-running deployments. The former `cancel-in-progress: true` setting can interrupt push deployments but does not explain these scheduled gaps. Sampled September failures stopped at refresh with `power-schema`; [the inspected failure log](https://github.com/drummer475-94/NWS-forecast/actions/runs/35124684237) predates the existing ReadyNC parser fix. Subsequent scheduled runs succeeded. GitHub's internal reason for each absent cron trigger remains unavailable.
 
 The status page fetches the deployed snapshot without browser caching, then refreshes statewide NWS alerts directly on load, every five minutes while visible, and when the tab becomes visible again. A failed live refresh retains last-known alerts. The interface derives freshness from the last successful timestamp rather than trusting a stored label:
 

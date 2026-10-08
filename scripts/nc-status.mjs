@@ -253,6 +253,15 @@ export function validateSnapshot(snapshot, countyCatalog, options = {}) {
   }
   validateSource(snapshot.sources.power, "power", requireComplete, latestSafeTime);
   validateSource(snapshot.sources.weather, "weather", requireComplete, latestSafeTime);
+  if (Number.isFinite(options.maxSourceAgeMs)) {
+    for (const key of ["power", "weather"]) {
+      const timestamp = Date.parse(snapshot.sources[key].lastSuccessAt);
+      if (!Number.isFinite(timestamp) || nowMs - timestamp > options.maxSourceAgeMs) {
+        throw new Error(`${key}-source-too-old`);
+      }
+    }
+    if (nowMs - Date.parse(snapshot.generatedAt) > options.maxSourceAgeMs) throw new Error("snapshot-too-old");
+  }
 
   const expectedCounties = new Map((countyCatalog ?? []).map((county) => [county.fips, county.name]));
   const expectedFips = new Set(expectedCounties.keys());

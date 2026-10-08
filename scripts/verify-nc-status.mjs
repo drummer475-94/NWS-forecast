@@ -9,6 +9,7 @@ const [snapshotText, geometryText] = await Promise.all([
 ]);
 const snapshot = JSON.parse(snapshotText);
 const countyCatalog = countyCatalogFromGeoJson(JSON.parse(geometryText));
-validateSnapshot(snapshot, countyCatalog, { requireComplete: true });
+// Publication must not accept an old snapshot merely because its stored label says fresh.
+validateSnapshot(snapshot, countyCatalog, { requireComplete: true, maxSourceAgeMs: 5 * 60_000 });
 
 console.log(`Verified ${snapshot.power.length} counties and ${snapshot.alerts.length} active alerts in ${snapshotPath}.`);
