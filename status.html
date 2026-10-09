@@ -10,8 +10,8 @@
     <link rel="preconnect" href="https://api.zippopotam.us">
     <link rel="preconnect" href="https://basemap.nationalmap.gov">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-    <link rel="stylesheet" href="styles.css?v=20260913-1">
-    <link rel="stylesheet" href="status.css?v=20260913-1">
+    <link rel="stylesheet" href="styles.css?v=20261009-1">
+    <link rel="stylesheet" href="status.css?v=20261009-1">
     <script>
       (function () {
         try {
@@ -159,6 +159,7 @@
               <span class="section-meta" id="weatherFreshness">Unavailable</span>
             </div>
             <div class="status-alert-list" id="statusAlertList"></div>
+            <div class="status-unmatched hidden" id="statusUnmatchedAlerts" role="group" aria-label="Alerts not matched to a county"></div>
           </article>
         </section>
 
@@ -183,6 +184,7 @@
     <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-    <script src="status.js?v=20260913-1"></script>
+    <script src="alert-geography.js?v=20261009-1"></script>
+    <script src="status.js?v=20261009-1"></script>
   </body>
 </html>

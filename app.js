@@ -15,6 +15,13 @@ const RADAR_CACHE_LIMIT = 4;
 const RADAR_CHOICE_LIMIT = 6;
 const RADAR_CHOICE_RADIUS_MILES = 250;
 const RADAR_CHOICE_MINIMUM = 4;
+const RADAR_REFRESH_MS = 5 * 60 * 1000;
+// NWS observations normally arrive hourly or better; anything older than this is no
+// longer "current" and the hero panel falls back to the hourly forecast.
+const OBSERVATION_MAX_AGE_MS = 90 * 60 * 1000;
+// NWS qualityControl flags: X = rejected, Q = questionable, B = subjective bad.
+const REJECTED_QUALITY_CODES = ['X', 'Q', 'B'];
+const OBSERVATION_FIELD_COUNT = 5;
 const TRANSPARENT_TILE = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
 
 // Tick text for the radar intensity legend. NWS super-resolution base reflectivity
@@ -56,6 +63,7 @@ const state = {
   warningFeatures: [],
   alertsStale: false,
   requestController: null,
+  forecastLoad: null,
   zipController: null,
   zipLoadId: 0,
   manualLocationRequested: false,
@@ -65,6 +73,11 @@ const state = {
   streetLayer: null,
   radarController: null,
   radarLoadId: 0,
+  radarLoadKey: '',
+  radarRefreshTimer: 0,
+  radarRefreshController: null,
+  radarRefreshPromise: null,
+  radarRefreshCheckedAt: 0,
   radarLayer: null,
   radarLayers: new Map(),
   radarSource: 'rainviewer',
@@ -96,6 +109,7 @@ const el = {
   updatedLabel: document.querySelector('#updatedLabel'),
   currentTemp: document.querySelector('#currentTemp'),
   currentSummary: document.querySelector('#currentSummary'),
+  currentSource: document.querySelector('#currentSource'),
   feelsLike: document.querySelector('#feelsLike'),
   wind: document.querySelector('#wind'),
   humidity: document.querySelector('#humidity'),
@@ -117,6 +131,7 @@ const el = {
   alertsList: document.querySelector('#alertsList'),
   radarTimestamp: document.querySelector('#radarTimestamp'),
   radarStatus: document.querySelector('#radarStatus'),
+  radarFreshness: document.querySelector('#radarFreshness'),
   radarProgress: document.querySelector('#radarProgress'),
   radarPlayButton: document.querySelector('#radarPlayButton'),
   radarRetryButton: document.querySelector('#radarRetryButton'),
@@ -340,6 +355,23 @@ async function loadForecast(lat, lon) {
   const controller = new AbortController();
   state.requestController = controller;
   const signal = controller.signal;
+  // Every load gets its own context. Optional data (observation, gridpoint
+  // precipitation) writes into it, and anything that arrives after a newer load has
+  // replaced it is dropped instead of overwriting the newer location.
+  const load = {
+    id: (state.forecastLoad ? state.forecastLoad.id : 0) + 1,
+    signal: signal,
+    period: null,
+    generatedAt: '',
+    observation: null,
+    observationPending: true,
+    precipMm: NaN,
+    precipPending: true,
+    primaryReady: false,
+    currentRendered: false,
+    optional: null
+  };
+  state.forecastLoad = load;
   setLoading(true);
   state.lat = roundCoord(Number(lat));
   state.lon = roundCoord(Number(lon));
@@ -353,6 +385,8 @@ async function loadForecast(lat, lon) {
     state.radarChoices = [];
     clearRadarStationMarkers();
     el.radarPicker.classList.add('hidden');
+    el.currentSource.textContent = 'Loading current conditions for this location.';
+    el.currentSource.dataset.source = 'forecast';
   }
 
   refreshLocationAlerts();
@@ -362,6 +396,7 @@ async function loadForecast(lat, lon) {
       'https://api.weather.gov/points/' + state.lat + ',' + state.lon,
       { signal: signal, retries: 1 }
     );
+    assertCurrentForecastLoad(load);
     const props = point && point.properties;
     if (!props || !props.forecast || !props.forecastHourly) {
       throw new Error('NWS did not return forecast endpoints for this location.');
@@ -387,20 +422,18 @@ async function loadForecast(lat, lon) {
       loadRadar(state.radarStation ? 'nws' : 'rainviewer');
     }
 
+    // Optional requests start now so they overlap with the forecast, but nothing
+    // below waits for them; they refresh the current-conditions panel on arrival.
+    load.optional = loadOptionalCurrentData(load, props);
+
     const requests = await Promise.allSettled([
       fetchJson(state.forecastUrl, { signal: signal, retries: 1 }),
-      fetchJson(state.hourlyUrl, { signal: signal, retries: 1 }),
-      loadLatestObservation(props.observationStations, signal),
-      state.gridDataUrl
-        ? fetchJson(state.gridDataUrl, { signal: signal, retries: 1 })
-        : Promise.resolve(null)
+      fetchJson(state.hourlyUrl, { signal: signal, retries: 1 })
     ]);
 
-    if (signal.aborted) throw createAbortError();
+    assertCurrentForecastLoad(load);
     const daily = requests[0].status === 'fulfilled' ? requests[0].value : null;
     const hourly = requests[1].status === 'fulfilled' ? requests[1].value : null;
-    const observation = requests[2].status === 'fulfilled' ? requests[2].value : null;
-    const gridData = requests[3].status === 'fulfilled' ? requests[3].value : null;
     const dailyPeriods = daily && daily.properties && Array.isArray(daily.properties.periods)
       ? daily.properties.periods
       : [];
@@ -408,8 +441,9 @@ async function loadForecast(lat, lon) {
       ? hourly.properties.periods
       : [];
 
+    load.primaryReady = true;
     if (!dailyPeriods.length && !hourlyPeriods.length) {
-      setCurrentUnavailable(null, NaN);
+      renderLoadCurrentConditions(load);
       renderHourly([]);
       renderDaily([], []);
       updateLocationLabels();
@@ -422,17 +456,11 @@ async function loadForecast(lat, lon) {
             : new Error('NWS returned an incomplete forecast.'));
     }
 
-    const precipMm = calculate24HourPrecip(gridData && gridData.properties);
     if (hourlyPeriods.length) {
-      updateCurrent(
-        hourlyPeriods[0],
-        hourly.properties.generatedAt,
-        observation && observation.properties,
-        precipMm
-      );
-    } else {
-      setCurrentUnavailable(observation && observation.properties, precipMm);
+      load.period = hourlyPeriods[0];
+      load.generatedAt = hourly.properties.generatedAt;
     }
+    renderLoadCurrentConditions(load);
     renderHourly(hourlyPeriods.slice(0, 24));
     renderDaily(dailyPeriods, hourlyPeriods);
     updateLocationLabels(daily && daily.properties && daily.properties.updated);
@@ -440,7 +468,7 @@ async function loadForecast(lat, lon) {
     loadNearbyRadarChoices(!isSameLocation);
     setLocationDisclosure(false);
   } catch (error) {
-    if (isAbortError(error)) return;
+    if (isAbortError(error) || !isCurrentForecastLoad(load)) return;
     console.error(error);
     showToast(friendlyForecastError(error));
     el.updatedLabel.textContent = 'Forecast unavailable. Try again or choose a nearby ZIP code.';
@@ -453,6 +481,66 @@ async function loadForecast(lat, lon) {
   }
 }
 
+function isCurrentForecastLoad(load) {
+  return Boolean(load) && state.forecastLoad === load && !load.signal.aborted;
+}
+
+function assertCurrentForecastLoad(load) {
+  if (!isCurrentForecastLoad(load)) throw createAbortError();
+}
+
+// Observations and gridpoint precipitation only enrich the hero panel. Each settles
+// on its own, never rejects, and is ignored if a newer location load has started.
+function loadOptionalCurrentData(load, props) {
+  const observationRequest = loadLatestObservation(props.observationStations, load.signal)
+    .then(function (observation) {
+      if (!isCurrentForecastLoad(load)) return;
+      load.observation = observation;
+    })
+    .catch(function (error) {
+      if (isAbortError(error)) return;
+      console.warn('Latest station observation is unavailable.', error);
+    })
+    .then(function () {
+      if (!isCurrentForecastLoad(load)) return;
+      load.observationPending = false;
+      renderLoadCurrentConditions(load);
+    });
+
+  const precipRequest = (state.gridDataUrl
+    ? fetchJson(state.gridDataUrl, { signal: load.signal, retries: 1 })
+    : Promise.resolve(null))
+    .then(function (gridData) {
+      if (!isCurrentForecastLoad(load)) return;
+      load.precipMm = calculate24HourPrecip(gridData && gridData.properties);
+    })
+    .catch(function (error) {
+      if (isAbortError(error)) return;
+      console.warn('Gridpoint precipitation is unavailable.', error);
+    })
+    .then(function () {
+      if (!isCurrentForecastLoad(load)) return;
+      load.precipPending = false;
+      renderLoadCurrentConditions(load);
+    });
+
+  return Promise.all([observationRequest, precipRequest]);
+}
+
+function renderLoadCurrentConditions(load) {
+  if (!load.primaryReady) return;
+  const options = { observationPending: load.observationPending, precipPending: load.precipPending };
+  if (load.period) {
+    // Only the first render stamps the "Updated" label; later optional-data renders
+    // must not overwrite the daily forecast's update time.
+    const stamp = load.currentRendered ? undefined : load.generatedAt;
+    load.currentRendered = true;
+    updateCurrent(load.period, stamp, load.observation, load.precipMm, options);
+  } else {
+    setCurrentUnavailable(load.observation, load.precipMm, options);
+  }
+}
+
 function friendlyForecastError(error) {
   if (!navigator.onLine) return 'You are offline. Forecast data will load after you reconnect.';
   if (error && error.status === 404) return 'NWS does not provide a forecast for this location.';
@@ -461,64 +549,253 @@ function friendlyForecastError(error) {
   return (error && error.message) || 'NWS forecast data could not be loaded.';
 }
 
-function updateCurrent(period, generatedAt, observation, precipMm) {
+// Merges one hourly forecast period with the latest station observation. Measured
+// values win only when the observation is recent and the individual reading is
+// present and not QC-rejected; everything else falls back per field to the forecast
+// and is tagged as such, so a forecast number is never shown as observed.
+function resolveCurrentConditions(period, observation, nowMs) {
+  const obs = readObservation(observation, nowMs);
+  const useObservation = obs.status === 'ok';
+  const pick = function (observed, forecast) {
+    if (useObservation && Number.isFinite(observed)) return { value: observed, source: 'observed' };
+    if (Number.isFinite(forecast)) return { value: forecast, source: 'forecast' };
+    return { value: NaN, source: '' };
+  };
+
+  const temp = pick(obs.tempF, period ? getForecastTemperatureF(period) : NaN);
+  const humidity = pick(obs.humidity, period ? getQuantValue(period.relativeHumidity) : NaN);
+  const dewPoint = pick(obs.dewPointF, period && period.dewpoint
+    ? toFahrenheit(getQuantValue(period.dewpoint), period.dewpoint.unitCode)
+    : NaN);
+  const visibility = useObservation && Number.isFinite(obs.visibilityMiles)
+    ? { value: obs.visibilityMiles, source: 'observed' }
+    : { value: NaN, source: '' };
+
+  let wind = { text: '--', raw: '', source: '' };
+  if (useObservation && Number.isFinite(obs.windMph)) {
+    wind = { text: formatObservedWind(obs), raw: obs.windMph.toFixed(1) + ' mph', source: 'observed' };
+  } else if (period && period.windSpeed) {
+    wind = {
+      text: compactWind(period.windSpeed, period.windDirection),
+      raw: period.windSpeed,
+      source: 'forecast'
+    };
+  }
+
+  let summary = { text: '', source: '' };
+  if (useObservation && obs.summary) summary = { text: obs.summary, source: 'observed' };
+  else if (period && period.shortForecast) summary = { text: period.shortForecast, source: 'forecast' };
+
+  const feelsValue = calculateFeelsLike(temp.value, humidity.value, wind.raw);
+  const inputSources = [temp.source, humidity.source, wind.source].filter(Boolean);
+  const forecastInputs = inputSources.filter(function (source) { return source === 'forecast'; }).length;
+  let feelsSource = '';
+  if (Number.isFinite(feelsValue)) {
+    if (!forecastInputs) feelsSource = 'observed';
+    else feelsSource = forecastInputs === inputSources.length ? 'forecast' : 'mixed';
+  }
+
+  return {
+    mode: useObservation ? 'observed' : 'forecast',
+    reason: useObservation ? '' : obs.status,
+    hasForecast: Boolean(period),
+    stationId: obs.stationId,
+    stationName: obs.stationName,
+    observedAt: obs.observedAt,
+    ageMs: obs.ageMs,
+    temp: temp,
+    summary: summary,
+    feels: { value: feelsValue, source: feelsSource },
+    wind: wind,
+    humidity: humidity,
+    dewPoint: dewPoint,
+    visibility: visibility
+  };
+}
+
+// Validates and normalizes a station observation into display units. The result's
+// status is 'ok' only when it is recent and carries at least one usable reading.
+function readObservation(observation, nowMs) {
+  const props = observation && observation.properties;
+  if (!props) return { status: 'missing' };
+  const result = {
+    status: 'unusable',
+    stationId: String(observation.stationId || stationIdFromUrl(props.station) || ''),
+    stationName: String(observation.stationName || ''),
+    observedAt: Date.parse(props.timestamp),
+    ageMs: NaN,
+    score: 0
+  };
+  if (!Number.isFinite(result.observedAt)) return result;
+  // Tolerate small clock skew, but a timestamp far in the future cannot be trusted.
+  if (result.observedAt - nowMs > 10 * 60 * 1000) return result;
+  result.ageMs = Math.max(0, nowMs - result.observedAt);
+  if (result.ageMs > OBSERVATION_MAX_AGE_MS) {
+    result.status = 'outdated';
+    return result;
+  }
+
+  const unitOf = function (quantity) { return quantity && quantity.unitCode; };
+  const humidity = getMeasuredValue(props.relativeHumidity);
+  const windMph = toMph(getMeasuredValue(props.windSpeed), unitOf(props.windSpeed));
+  const gustMph = toMph(getMeasuredValue(props.windGust), unitOf(props.windGust));
+  const direction = getMeasuredValue(props.windDirection);
+  const visibilityMiles = distanceToMiles(getMeasuredValue(props.visibility), unitOf(props.visibility));
+  result.tempF = toFahrenheit(getMeasuredValue(props.temperature), unitOf(props.temperature));
+  result.dewPointF = toFahrenheit(getMeasuredValue(props.dewpoint), unitOf(props.dewpoint));
+  result.humidity = humidity >= 0 && humidity <= 100 ? humidity : NaN;
+  result.windMph = windMph >= 0 ? windMph : NaN;
+  result.gustMph = gustMph >= 0 ? gustMph : NaN;
+  result.windDirection = direction >= 0 && direction <= 360 ? direction : NaN;
+  result.visibilityMiles = visibilityMiles >= 0 ? visibilityMiles : NaN;
+  result.summary = String(props.textDescription || '').trim();
+  result.score = [result.tempF, result.dewPointF, result.humidity, result.windMph, result.visibilityMiles]
+    .filter(Number.isFinite).length;
+  result.status = result.score ? 'ok' : 'unusable';
+  return result;
+}
+
+function stationIdFromUrl(url) {
+  const match = /\/stations\/([A-Za-z0-9]+)\/?$/.exec(String(url || ''));
+  return match ? match[1].toUpperCase() : '';
+}
+
+// A reading flagged X (rejected), Q (questionable) or B (subjective bad) by NWS
+// quality control is treated as missing rather than shown.
+function getMeasuredValue(quantity) {
+  if (!quantity || typeof quantity !== 'object') return NaN;
+  if (REJECTED_QUALITY_CODES.indexOf(quantity.qualityControl) !== -1) return NaN;
+  return getQuantValue(quantity);
+}
+
+function getForecastTemperatureF(period) {
+  const unit = String(period.temperatureUnit || 'F').toUpperCase();
+  return toFahrenheit(Number(period.temperature), unit === 'C' ? 'wmoUnit:degC' : 'wmoUnit:degF');
+}
+
+function formatObservedWind(obs) {
+  const speed = Math.round(obs.windMph);
+  if (speed < 1) return 'Calm';
+  const direction = Number.isFinite(obs.windDirection) ? degreesToCardinal(obs.windDirection) + ' ' : '';
+  const gust = Math.round(obs.gustMph);
+  return direction + speed + ' mph' + (Number.isFinite(gust) && gust > speed ? ', gusts ' + gust : '');
+}
+
+function degreesToCardinal(degrees) {
+  const points = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE',
+    'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+  return points[Math.round(normalizeDegrees(degrees) / 22.5) % 16];
+}
+
+function formatObservationAge(ageMs) {
+  const minutes = Math.round(ageMs / 60000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return minutes + ' min ago';
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return hours + ' h' + (rest ? ' ' + rest + ' min' : '') + ' ago';
+}
+
+function describeCurrentSource(c, options) {
+  if (c.mode === 'observed') {
+    const station = c.stationId
+      ? c.stationId + (c.stationName ? ' (' + c.stationName + ')' : '')
+      : 'a nearby station';
+    const fallbacks = [['temperature', c.temp], ['conditions', c.summary], ['wind', c.wind],
+      ['humidity', c.humidity], ['dew point', c.dewPoint]]
+      .filter(function (entry) { return entry[1].source === 'forecast'; })
+      .map(function (entry) { return entry[0]; });
+    return 'Observed ' + formatObservationAge(c.ageMs) + ' at ' + station +
+      ' (' + formatClockTime(new Date(c.observedAt)) + ').' +
+      (fallbacks.length ? ' Forecast used for ' + fallbacks.join(', ') + '.' : '');
+  }
+  const base = c.hasForecast ? 'Forecast for this hour.' : 'Hourly forecast unavailable.';
+  if (c.reason === 'outdated') {
+    return base + ' The latest observation' + (c.stationId ? ' from ' + c.stationId : '') + ' (' +
+      formatObservationAge(c.ageMs) + ') is too old to show as current.';
+  }
+  if (c.reason === 'unusable') {
+    return base + ' The latest station observation had no usable readings.';
+  }
+  return base + (options && options.observationPending
+    ? ' Checking nearby station observations.'
+    : ' No recent station observation was available.');
+}
+
+function setMetricValue(node, text, source, annotate) {
+  node.textContent = text;
+  node.dataset.source = source || '';
+  if (!annotate || (source !== 'forecast' && source !== 'mixed') || text === '--') return;
+  const tag = document.createElement('span');
+  tag.className = 'metric-source';
+  tag.textContent = source === 'mixed' ? 'Partly forecast' : 'Forecast';
+  node.append(' ', tag);
+}
+
+function renderCurrentConditions(c, generatedAt, precipMm, options) {
+  const settings = options || {};
+  const annotate = c.mode === 'observed';
+  const degrees = function (value) { return Number.isFinite(value) ? Math.round(value) + '°' : '--'; };
+
+  el.currentTemp.textContent = Number.isFinite(c.temp.value) ? Math.round(c.temp.value) : '--';
+  el.currentTemp.dataset.source = c.temp.source;
+  el.currentSummary.textContent = c.summary.text || (c.hasForecast
+    ? 'Forecast unavailable'
+    : 'Hourly forecast is temporarily unavailable');
+  el.currentSource.textContent = describeCurrentSource(c, settings);
+  el.currentSource.dataset.source = c.mode;
+  setMetricValue(el.feelsLike, Number.isFinite(c.feels.value) ? Math.round(c.feels.value) + '°' : '--°',
+    c.feels.source, annotate);
+  setMetricValue(el.wind, c.wind.text, c.wind.source, annotate);
+  setMetricValue(el.humidity, Number.isFinite(c.humidity.value) ? Math.round(c.humidity.value) + '%' : '--',
+    c.humidity.source, annotate);
+  setMetricValue(el.dewPoint, degrees(c.dewPoint.value), c.dewPoint.source, annotate);
+  setMetricValue(el.visibility, formatDistance(c.visibility.value, 'mi'), c.visibility.source, false);
+  el.precipChance.textContent = c.hasForecast ? formatPercent(c.precipChance) : '--';
+  if (settings.precipPending && !Number.isFinite(precipMm)) {
+    el.precipTotal.textContent = 'Loading…';
+    el.precipTotal.title = 'Loading NWS quantitative precipitation data';
+  } else {
+    el.precipTotal.textContent = formatPrecipTotal(precipMm);
+    el.precipTotal.title = Number.isFinite(precipMm)
+      ? 'Forecast liquid precipitation for the next 24 hours'
+      : 'NWS quantitative precipitation data is unavailable';
+  }
+  if (generatedAt !== undefined) {
+    el.updatedLabel.textContent = generatedAt
+      ? 'Updated ' + formatDateTime(generatedAt)
+      : 'Updated by NWS';
+  }
+}
+
+function updateCurrent(period, generatedAt, observation, precipMm, options) {
   if (!period) return;
-  const humidity = getQuantValue(period.relativeHumidity);
-  const feels = calculateFeelsLike(period.temperature, humidity, period.windSpeed);
-
-  el.currentTemp.textContent = Math.round(period.temperature);
-  el.currentSummary.textContent = period.shortForecast || 'Forecast unavailable';
-  el.feelsLike.textContent = Number.isFinite(feels)
-    ? Math.round(feels) + '\u00B0'
-    : Math.round(period.temperature) + '\u00B0';
-  el.wind.textContent = compactWind(period.windSpeed, period.windDirection);
-  el.humidity.textContent = Number.isFinite(humidity) ? Math.round(humidity) + '%' : '--';
-  el.precipChance.textContent = formatPercent(getQuantValue(period.probabilityOfPrecipitation));
-  el.dewPoint.textContent = formatTemperature(
-    getQuantValue(period.dewpoint),
-    period.dewpoint && period.dewpoint.unitCode
-  );
-  el.visibility.textContent = formatDistance(
-    getQuantValue(observation && observation.visibility),
-    observation && observation.visibility && observation.visibility.unitCode
-  );
-  el.precipTotal.textContent = formatPrecipTotal(precipMm);
-  el.precipTotal.title = Number.isFinite(precipMm)
-    ? 'Forecast liquid precipitation for the next 24 hours'
-    : 'NWS quantitative precipitation data is unavailable';
-  el.updatedLabel.textContent = generatedAt
-    ? 'Updated ' + formatDateTime(generatedAt)
-    : 'Updated by NWS';
+  const c = resolveCurrentConditions(period, observation, Date.now());
+  c.precipChance = getQuantValue(period.probabilityOfPrecipitation);
+  renderCurrentConditions(c, generatedAt, precipMm, options);
 }
 
-function setCurrentUnavailable(observation, precipMm) {
-  el.currentTemp.textContent = '--';
-  el.currentSummary.textContent = 'Hourly forecast is temporarily unavailable';
-  el.feelsLike.textContent = '--\u00B0';
-  el.wind.textContent = '--';
-  el.humidity.textContent = '--';
-  el.precipChance.textContent = '--';
-  el.dewPoint.textContent = '--';
-  el.visibility.textContent = formatDistance(
-    getQuantValue(observation && observation.visibility),
-    observation && observation.visibility && observation.visibility.unitCode
-  );
-  el.precipTotal.textContent = formatPrecipTotal(precipMm);
-  el.precipTotal.title = Number.isFinite(precipMm)
-    ? 'Forecast liquid precipitation for the next 24 hours'
-    : 'NWS quantitative precipitation data is unavailable';
+function setCurrentUnavailable(observation, precipMm, options) {
+  const c = resolveCurrentConditions(null, observation, Date.now());
+  c.precipChance = NaN;
+  renderCurrentConditions(c, undefined, precipMm, options);
 }
 
+// The first stations NWS lists are the nearest. Prefer the first one whose latest
+// observation is recent and reports every field shown; otherwise keep the most
+// complete recent one, and failing that the newest reading so the panel can say why
+// it was not used. Returns { properties, stationId, stationName } or null.
 async function loadLatestObservation(stationsUrl, signal) {
   if (!stationsUrl) return null;
   const stations = await fetchJson(stationsUrl, { signal: signal, retries: 1 });
   const features = stations && Array.isArray(stations.features) ? stations.features : [];
-  let fallback = null;
+  let best = null;
+  let bestScore = 0;
+  let newest = null;
 
   for (const feature of features.slice(0, 3)) {
-    const stationId = String(
-      feature && feature.properties && feature.properties.stationIdentifier || ''
-    ).trim().toUpperCase();
+    const featureProps = feature && feature.properties || {};
+    const stationId = String(featureProps.stationIdentifier || '').trim().toUpperCase();
     if (!/^[A-Z0-9]{3,8}$/.test(stationId)) continue;
 
     try {
@@ -526,16 +803,28 @@ async function loadLatestObservation(stationsUrl, signal) {
         'https://api.weather.gov/stations/' + encodeURIComponent(stationId) + '/observations/latest',
         { signal: signal, retries: 1 }
       );
-      if (!fallback) fallback = observation;
-      const visibility = observation && observation.properties && observation.properties.visibility;
-      if (Number.isFinite(getQuantValue(visibility))) return observation;
+      if (!observation || !observation.properties) continue;
+      const candidate = {
+        properties: observation.properties,
+        stationId: stationId,
+        stationName: String(featureProps.name || '').trim()
+      };
+      if (!newest) newest = candidate;
+      const reading = readObservation(candidate, Date.now());
+      if (reading.status === 'ok' && reading.score > bestScore) {
+        best = candidate;
+        bestScore = reading.score;
+      }
+      if (bestScore >= OBSERVATION_FIELD_COUNT) break;
     } catch (error) {
       if (isAbortError(error)) throw error;
-      if (!error || error.status !== 404) throw error;
+      if (error && error.status === 404) continue;
+      if (best || newest) break;
+      throw error;
     }
   }
 
-  return fallback;
+  return best || newest;
 }
 
 function calculate24HourPrecip(gridProperties, startMs) {
@@ -900,14 +1189,20 @@ async function refreshLocationAlerts() {
   }
 }
 
+// Same active-alert rule as NC Status: an Actual, non-canceled message before its expires/ends time.
+function isActiveAlert(alert, now) {
+  if (!alert || alert.status !== 'Actual' || alert.messageType === 'Cancel') return false;
+  const expiry = Date.parse(alert.ends || alert.expires);
+  return Number.isFinite(expiry) && expiry > now;
+}
+
 function getThreatWarnings(features, now) {
   return features.map(function (feature) { return feature && feature.properties; })
     .filter(function (alert) {
       if (!alert || !/^(Tornado Warning|Flash Flood Warning)$/i.test(alert.event || '')) return false;
-      if (alert.status !== 'Actual' || alert.messageType === 'Cancel') return false;
+      if (!isActiveAlert(alert, now)) return false;
       const effective = Date.parse(alert.effective);
-      const expiry = Date.parse(alert.ends || alert.expires);
-      return (!Number.isFinite(effective) || effective <= now) && Number.isFinite(expiry) && expiry > now;
+      return !Number.isFinite(effective) || effective <= now;
     })
     .sort(function (a, b) { return Number(/^Tornado/i.test(b.event)) - Number(/^Tornado/i.test(a.event)); });
 }
@@ -948,7 +1243,9 @@ function renderAlerts(features) {
 
   const alerts = features
     .map(function (feature) { return feature && feature.properties; })
-    .filter(function (alert) { return /\b(watch|warning)\b/i.test((alert && alert.event) || ''); })
+    .filter(function (alert) {
+      return /\b(watch|warning)\b/i.test((alert && alert.event) || '') && isActiveAlert(alert, Date.now());
+    })
     .sort(function (a, b) {
       return new Date(a.ends || a.expires || 0) - new Date(b.ends || b.expires || 0);
     });
@@ -969,7 +1266,9 @@ function renderAlerts(features) {
       escapeHtml(alert.headline || alert.areaDesc || 'NWS active alert') +
       '</p></div><div class="alert-meta"><span>' +
       escapeHtml(alert.severity || 'Alert') +
-      '</span><span>' + formatAlertEnds(alert.ends || alert.expires) + '</span></div>';
+      '</span><span>' + formatAlertEnds(alert.ends || alert.expires) + '</span>' +
+      (safeUrl(alert['@id']) ? '<a class="alert-source" href="' + escapeHtml(safeUrl(alert['@id'])) +
+        '" target="_blank" rel="noreferrer">Official NWS details</a>' : '') + '</div>';
     fragment.append(card);
   }
   el.alertsList.append(fragment);
@@ -1334,13 +1633,20 @@ async function loadRadar(preferredSource) {
     return;
   }
 
-  const loadId = ++state.radarLoadId;
-  if (state.radarController) state.radarController.abort();
-  const controller = new AbortController();
-  state.radarController = controller;
   const requestedSource = preferredSource === 'rainviewer'
     ? 'rainviewer'
     : (state.radarStation ? 'nws' : 'rainviewer');
+  // An identical load already in flight (for example a manual refresh racing the
+  // forecast's own station check) would only repeat the same provider requests.
+  const loadKey = requestedSource + ':' + (requestedSource === 'nws' ? state.radarStation : '');
+  if (state.radarController && state.radarLoadKey === loadKey) return;
+
+  const loadId = ++state.radarLoadId;
+  if (state.radarController) state.radarController.abort();
+  stopRadarRefresh();
+  const controller = new AbortController();
+  state.radarController = controller;
+  state.radarLoadKey = loadKey;
   const wasAnimating = isRadarAnimating();
   stopRadarAnimation();
   setRadarLoading(requestedSource);
@@ -1374,6 +1680,8 @@ async function loadRadar(preferredSource) {
     setRadarControls(true);
     setRadarStatus('ready', radarData.status);
     renderRadarFrame(state.radarFrameIndex);
+    updateRadarFreshness(false);
+    state.radarRefreshCheckedAt = Date.now();
     preloadRadarNeighbors();
     if (wasAnimating) startRadarAnimation();
     if (usedFallback) {
@@ -1394,7 +1702,11 @@ async function loadRadar(preferredSource) {
     );
     showToast('Radar services are temporarily unavailable. Use Retry radar to try again.');
   } finally {
-    if (state.radarController === controller) state.radarController = null;
+    if (state.radarController === controller) {
+      state.radarController = null;
+      state.radarLoadKey = '';
+      scheduleRadarRefresh();
+    }
   }
 }
 
@@ -1508,7 +1820,7 @@ function ensureRadarLayer(index) {
   if (!frame || !state.map) return null;
   if (state.radarSource === 'nws' && (!state.radarWmsUrl || !state.radarLayerName)) return null;
   if (state.radarSource === 'rainviewer' && !state.radarHost) return null;
-  const key = state.radarSource + ':' + (frame.iso || frame.path);
+  const key = radarFrameKey(frame);
   const cached = state.radarLayers.get(key);
   if (cached) {
     cached.lastUsed = performance.now();
@@ -1626,6 +1938,145 @@ function resetRadarLayers() {
   state.radarLayer = null;
 }
 
+function radarFrameKey(frame) {
+  return state.radarSource + ':' + (frame.iso || frame.path);
+}
+
+function getLatestRadarScanTime(frames) {
+  let latest = NaN;
+  for (const frame of frames) {
+    const time = Number(frame && frame.time);
+    if (Number.isFinite(time) && !(time <= latest)) latest = time;
+  }
+  return latest;
+}
+
+// Shows when the newest radar scan was taken (from provider metadata, not when it
+// was fetched), plus a non-destructive note when the last refresh attempt failed.
+function updateRadarFreshness(refreshFailed) {
+  const latest = getLatestRadarScanTime(state.radarFrames);
+  if (!Number.isFinite(latest)) {
+    hideRadarFreshness();
+    return;
+  }
+  el.radarFreshness.textContent = 'Latest scan ' + formatUnix(latest) +
+    (refreshFailed ? '. Radar update failed; showing the last loaded frames. Will try again shortly.' : '');
+  el.radarFreshness.dataset.state = refreshFailed ? 'stale' : 'current';
+  el.radarFreshness.classList.remove('hidden');
+}
+
+function hideRadarFreshness() {
+  el.radarFreshness.textContent = '';
+  el.radarFreshness.classList.add('hidden');
+}
+
+function canRefreshRadar() {
+  return Boolean(state.map) && state.radarFrames.length > 0 &&
+    !document.hidden && navigator.onLine !== false;
+}
+
+// One timer, re-armed only after the previous check settles, so refreshes cannot
+// overlap or pile up. RainViewer asks clients not to poll aggressively.
+function scheduleRadarRefresh(delayMs) {
+  window.clearTimeout(state.radarRefreshTimer);
+  state.radarRefreshTimer = 0;
+  if (!canRefreshRadar() || state.radarController || state.radarRefreshController) return;
+  state.radarRefreshTimer = window.setTimeout(function () {
+    state.radarRefreshTimer = 0;
+    refreshRadarFrames();
+  }, Math.max(0, delayMs === undefined ? RADAR_REFRESH_MS : delayMs));
+}
+
+function stopRadarRefresh() {
+  window.clearTimeout(state.radarRefreshTimer);
+  state.radarRefreshTimer = 0;
+  if (state.radarRefreshController) state.radarRefreshController.abort();
+}
+
+// Called when the page becomes visible or the connection returns: refresh at once
+// if a check is due, otherwise wait out the remainder of the interval.
+function resumeRadarRefresh() {
+  if (!canRefreshRadar() || state.radarController || state.radarRefreshController) return;
+  const remaining = state.radarRefreshCheckedAt + RADAR_REFRESH_MS - Date.now();
+  if (remaining <= 0) refreshRadarFrames();
+  else scheduleRadarRefresh(remaining);
+}
+
+function refreshRadarFrames() {
+  if (state.radarRefreshController) return state.radarRefreshPromise || Promise.resolve();
+  if (!canRefreshRadar() || state.radarController) return Promise.resolve();
+  window.clearTimeout(state.radarRefreshTimer);
+  state.radarRefreshTimer = 0;
+  const controller = new AbortController();
+  state.radarRefreshController = controller;
+  state.radarRefreshCheckedAt = Date.now();
+  state.radarRefreshPromise = runRadarRefresh(controller);
+  return state.radarRefreshPromise;
+}
+
+async function runRadarRefresh(controller) {
+  const loadId = state.radarLoadId;
+  const source = state.radarSource;
+  const station = state.radarStation;
+  const isStale = function () {
+    return controller.signal.aborted || loadId !== state.radarLoadId ||
+      source !== state.radarSource || station !== state.radarStation;
+  };
+  try {
+    // Refresh whatever source is active: a fallback to RainViewer stays on
+    // RainViewer, and a manually chosen station is never swapped out.
+    const radarData = source === 'nws'
+      ? await loadNwsRadarData(station, controller.signal)
+      : await loadRainViewerRadarData(controller.signal);
+    if (isStale()) return;
+    reconcileRadarFrames(radarData);
+  } catch (error) {
+    if (isAbortError(error) || isStale()) return;
+    console.warn('Radar refresh failed; keeping the frames already loaded.', error);
+    updateRadarFreshness(true);
+  } finally {
+    if (state.radarRefreshController === controller) {
+      state.radarRefreshController = null;
+      state.radarRefreshPromise = null;
+      scheduleRadarRefresh();
+    }
+  }
+}
+
+// Swaps in a new frame list without rebuilding the map: layers for frames that still
+// exist stay cached, new frames get layers on demand, and layers for frames that
+// aged out are removed so they cannot accumulate.
+function reconcileRadarFrames(radarData) {
+  const newFrames = radarData.frames;
+  const oldFrames = state.radarFrames;
+  if (radarData.host) state.radarHost = radarData.host;
+  const oldKeys = oldFrames.map(radarFrameKey);
+  const newKeys = newFrames.map(radarFrameKey);
+  if (oldKeys.join('|') === newKeys.join('|')) {
+    updateRadarFreshness(false);
+    return;
+  }
+
+  const currentKey = oldKeys[state.radarFrameIndex];
+  const wasLatest = state.radarFrameIndex >= oldFrames.length - 1;
+  const animating = isRadarAnimating();
+  state.radarFrames = newFrames;
+
+  const keep = new Set(newKeys);
+  for (const entry of Array.from(state.radarLayers.values())) {
+    if (keep.has(entry.key)) continue;
+    if (state.map.hasLayer(entry.layer)) state.map.removeLayer(entry.layer);
+    state.radarLayers.delete(entry.key);
+    if (state.radarLayer === entry.layer) state.radarLayer = null;
+  }
+
+  let index = newKeys.indexOf(currentKey);
+  if (wasLatest && !animating) index = newKeys.length - 1;
+  else if (index < 0) index = 0;
+  renderRadarFrame(index);
+  updateRadarFreshness(false);
+}
+
 function toggleRadarAnimation() {
   if (isRadarAnimating()) stopRadarAnimation();
   else startRadarAnimation();
@@ -1669,6 +2120,7 @@ function isRadarAnimating() {
 
 function setRadarLoading(source) {
   el.radarTimestamp.textContent = 'Loading radar';
+  hideRadarFreshness();
   setRadarStatus('loading', source === 'nws'
     ? 'Connecting to NWS super-res radar'
     : 'Connecting to RainViewer HD');
@@ -1678,6 +2130,8 @@ function setRadarLoading(source) {
 
 function setRadarError(message, canRetry) {
   stopRadarAnimation();
+  stopRadarRefresh();
+  hideRadarFreshness();
   el.radarTimestamp.textContent = message;
   setRadarStatus('error', message);
   el.radarRetryButton.classList.toggle('hidden', !canRetry);
@@ -1771,6 +2225,8 @@ function handleVisibilityChange() {
     renderWarningBanner();
     refreshLocationAlerts();
   }
+  if (document.hidden) stopRadarRefresh();
+  else resumeRadarRefresh();
   if (document.hidden && isRadarAnimating()) {
     state.radarResumeOnVisible = true;
     stopRadarAnimation();
@@ -1930,19 +2386,45 @@ function formatPercent(value) {
   return Number.isFinite(value) ? Math.round(value) + '%' : '--';
 }
 
+function toFahrenheit(value, unitCode) {
+  if (!Number.isFinite(value)) return NaN;
+  const unit = String(unitCode || '');
+  if (unit.endsWith('degC')) return value * 9 / 5 + 32;
+  if (unit.endsWith(':K') || unit === 'K') return (value - 273.15) * 9 / 5 + 32;
+  if (unit === '' || unit.endsWith('degF')) return value;
+  return NaN;
+}
+
 function formatTemperature(value, unitCode) {
-  if (!Number.isFinite(value)) return '--';
-  const fahrenheit = (unitCode || '').endsWith('degC') ? value * 9 / 5 + 32 : value;
-  return Math.round(fahrenheit) + '\u00B0';
+  const fahrenheit = toFahrenheit(value, unitCode);
+  return Number.isFinite(fahrenheit) ? Math.round(fahrenheit) + '\u00B0' : '--';
+}
+
+// Converts an NWS wind speed to mph. Station observations report km/h
+// (wmoUnit:km_h-1); gridded data and some feeds use m/s or knots.
+function toMph(value, unitCode) {
+  if (!Number.isFinite(value)) return NaN;
+  const unit = String(unitCode || '');
+  if (unit.endsWith('km_h-1')) return value / 1.609344;
+  if (unit.endsWith('m_s-1')) return value * 2.2369363;
+  if (unit.endsWith('mi_h-1') || unit.endsWith('[mi_i]/h')) return value;
+  if (unit.endsWith(':kt') || unit.endsWith('[kn_i]')) return value * 1.1507794;
+  return NaN;
+}
+
+function distanceToMiles(value, unitCode) {
+  if (!Number.isFinite(value) || value < 0) return NaN;
+  const unit = String(unitCode || '');
+  if (unit === 'm' || unit.endsWith(':m')) return value / 1609.344;
+  if (unit === 'km' || unit.endsWith(':km')) return value / 1.609344;
+  return value;
 }
 
 function formatDistance(value, unitCode) {
-  if (!Number.isFinite(value) || value < 0) return '--';
-  const unit = String(unitCode || '');
-  let miles = value;
-  if (unit === 'm' || unit.endsWith(':m')) miles = value / 1609.344;
-  else if (unit === 'km' || unit.endsWith(':km')) miles = value / 1.609344;
-  return miles.toFixed(miles < 10 ? 1 : 0) + ' mi';
+  const miles = distanceToMiles(value, unitCode);
+  if (!Number.isFinite(miles)) return '--';
+  const tenths = Math.round(miles * 10) / 10;
+  return tenths.toFixed(tenths < 10 ? 1 : 0) + ' mi';
 }
 
 function formatPrecipTotal(mm) {

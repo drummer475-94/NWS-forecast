@@ -1,3 +1,6 @@
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
 export const NWS_ALERTS_URL = "https://api.weather.gov/alerts/active?area=NC";
 export const NCEM_POWER_URL = "https://fusion.ncsparta.gov/ReadyNC_PowerOutageAPI/html";
 
@@ -28,6 +31,31 @@ function isHttpsUrl(value) {
     return false;
   }
 }
+
+export const NC_COUNTY_FIPS = Array.from({ length: 100 }, (_, index) => `37${String(index * 2 + 1).padStart(3, "0")}`);
+const ALERT_GEOGRAPHY_VALUES = new Set(["county", "statewide", "unknown"]);
+
+// Forecast-zone (NCZ###) to county FIPS lookups are intentionally empty: the table could not be derived
+// reliably from the NWS zones API at authoring time, and zone-to-county mappings are never guessed.
+// Zone-only alerts resolve through SAME/UGC county codes, affectedZones county URLs, or polygon geometry.
+export const NC_ZONE_TO_COUNTY_FIPS = Object.freeze({});
+
+const geo = require("../alert-geography.js");
+const { countyFipsIntersecting: intersectingCountyFips, deriveAlertGeography: deriveGeography } =
+  geo.createAlertGeography({ countyFips: NC_COUNTY_FIPS, zoneTable: NC_ZONE_TO_COUNTY_FIPS });
+
+// Returns FIPS values of counties whose boundary intersects the alert geometry.
+export function countyFipsIntersecting(alertGeometry, boundaries) {
+  return intersectingCountyFips(alertGeometry, boundaries);
+}
+
+// Maps an NWS alert to counties without guessing. Order: SAME, UGC county codes (NCC), affectedZones county
+// URLs, configured zone table (NCZ), then polygon geometry when county boundaries are supplied.
+export function deriveAlertGeography(properties, geometry, { boundaries, zoneTable = NC_ZONE_TO_COUNTY_FIPS } = {}) {
+  return deriveGeography(properties, geometry, boundaries, zoneTable);
+}
+
+export const isAlertActive = geo.isAlertActive;
 
 function normalizeCountyName(value) {
   return cleanText(value).replace(/\s+COUNTY$/i, "").toUpperCase();
@@ -149,7 +177,7 @@ export function parseNcem(input, countyCatalog) {
   });
 }
 
-export function parseNws(input, nowMs = Date.now()) {
+export function parseNws(input, nowMs = Date.now(), options = {}) {
   const features = input?.features;
   if (!Array.isArray(features)) throw new Error("weather-schema");
 
@@ -161,10 +189,7 @@ export function parseNws(input, nowMs = Date.now()) {
     const expiresAt = validIso(properties.expires);
     if (!id || !event || !expiresAt) throw new Error("weather-schema");
 
-    const sameCodes = properties.geocode?.SAME;
-    const countyFips = Array.isArray(sameCodes)
-      ? Array.from(new Set(sameCodes.map(String).map((code) => /^037\d{3}$/.test(code) ? code.slice(1) : code).filter((code) => /^37\d{3}$/.test(code))))
-      : [];
+    const { geography, countyFips } = deriveAlertGeography(properties, feature?.geometry, options);
     const suppliedSeverity = cleanText(properties.severity);
     const severity = ALERT_SEVERITIES.has(suppliedSeverity) ? suppliedSeverity : "Unknown";
     const suppliedUrl = cleanText(properties["@id"]);
@@ -178,19 +203,21 @@ export function parseNws(input, nowMs = Date.now()) {
       urgency: cleanText(properties.urgency) || "Unknown",
       certainty: cleanText(properties.certainty) || "Unknown",
       status: cleanText(properties.status) || "Actual",
+      messageType: cleanText(properties.messageType) || undefined,
       sentAt: validIso(properties.sent) || expiresAt,
       effectiveAt: validIso(properties.effective),
       onsetAt: validIso(properties.onset),
       expiresAt,
       endsAt: validIso(properties.ends),
       areaDescription: cleanText(properties.areaDesc) || "North Carolina",
+      geography,
       countyFips,
       description: cleanText(properties.description) || undefined,
       instruction: cleanText(properties.instruction) || undefined,
       senderName: cleanText(properties.senderName) || "National Weather Service",
       sourceUrl,
     };
-  }).filter((alert) => alert.status !== "Cancel" && Date.parse(alert.expiresAt) > nowMs);
+  }).filter((alert) => isAlertActive(alert, nowMs));
 }
 
 export function unavailableSnapshot(at = new Date().toISOString()) {
@@ -299,6 +326,10 @@ export function validateSnapshot(snapshot, countyCatalog, options = {}) {
       (alert.endsAt !== undefined && !validIso(alert.endsAt)) ||
       (alert.description !== undefined && typeof alert.description !== "string") ||
       (alert.instruction !== undefined && typeof alert.instruction !== "string") ||
+      (alert.messageType !== undefined && !cleanText(alert.messageType)) ||
+      (alert.geography !== undefined && !ALERT_GEOGRAPHY_VALUES.has(alert.geography)) ||
+      (alert.geography === "unknown" && Array.isArray(alert.countyFips) && alert.countyFips.length > 0) ||
+      (alert.geography === "county" && Array.isArray(alert.countyFips) && alert.countyFips.length === 0) ||
       !Array.isArray(alert.countyFips) || new Set(alert.countyFips).size !== alert.countyFips.length || !isHttpsUrl(alert.sourceUrl) ||
       alert.countyFips.some((fips) => !/^37\d{3}$/.test(fips) || (expectedFips.size && !expectedFips.has(fips)))) {
       throw new Error("weather-record-schema");

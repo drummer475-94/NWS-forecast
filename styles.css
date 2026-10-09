@@ -1056,6 +1056,45 @@ a:hover {
   line-height: 1.25;
 }
 
+.current-source {
+  max-width: 22rem;
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.current-source[data-source="observed"] {
+  color: var(--ink-strong);
+}
+
+.metric-source {
+  display: inline-block;
+  margin-left: 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.5;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.radar-freshness {
+  margin: 8px 2px 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.radar-freshness[data-state="stale"] {
+  border-left: 3px solid var(--warning);
+  padding-left: 8px;
+}
+
 .manual-location {
   position: relative;
   z-index: 1;
@@ -1204,6 +1243,18 @@ a:hover {
   font-size: 0.8rem;
   font-weight: 790;
   text-align: right;
+}
+
+.alert-source {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.alert-source:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .hourly-scroll {

@@ -8,6 +8,7 @@ const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
 const statusPath = path.join(projectRoot, 'status.js');
+const alertGeographyPath = path.join(projectRoot, 'alert-geography.js');
 const statusHtmlPath = path.join(projectRoot, 'status.html');
 
 function createElement() {
@@ -44,6 +45,7 @@ function createElement() {
 function loadStatusForTesting(options = {}) {
   const elements = new Map();
   const documentElement = createElement();
+  const timers = { cleared: [], set: [] };
   const document = {
     addEventListener() {},
     createDocumentFragment() { return createElement(); },
@@ -59,7 +61,7 @@ function loadStatusForTesting(options = {}) {
   const storage = new Map();
   const window = {
     addEventListener() {},
-    clearInterval() {},
+    clearInterval(id) { timers.cleared.push(id); },
     clearTimeout,
     getComputedStyle() { return { getPropertyValue() { return ''; } }; },
     localStorage: {
@@ -68,14 +70,14 @@ function loadStatusForTesting(options = {}) {
       setItem(key, value) { storage.set(key, String(value)); }
     },
     matchMedia() { return { addEventListener() {}, matches: false }; },
-    setInterval() { return 1; },
+    setInterval(callback, delay) { timers.set.push({ callback, delay }); return timers.set.length; },
     setTimeout(callback, delay) { const timer = setTimeout(callback, delay); timer.unref(); return timer; }
   };
   const sandbox = {
     AbortController,
     console: { error() {}, log() {}, warn() {} },
     document,
-    fetch: async () => { throw new Error('not mocked'); },
+    fetch: options.fetch || (async () => { throw new Error('not mocked'); }),
     Intl,
     Map,
     navigator: options.navigator || {},
@@ -84,9 +86,18 @@ function loadStatusForTesting(options = {}) {
     window
   };
   const context = vm.createContext(sandbox);
+  // Mirrors status.html: the shared geography script loads before status.js.
+  vm.runInContext(fs.readFileSync(alertGeographyPath, 'utf8'), context, { filename: alertGeographyPath });
   const source = fs.readFileSync(statusPath, 'utf8') + `
     ;globalThis.__statusTestApi = {
       alertsForCounty,
+      handleVisibilityChange,
+      isSnapshotAcceptable,
+      loadStatusSnapshot,
+      refreshSourcesQuietly,
+      startAutoRefresh,
+      stopAutoRefresh,
+      unmatchedAlerts,
       alertCountLabel,
       alertSummaryMessage,
       countyCatalog: NC_COUNTIES,
@@ -107,7 +118,7 @@ function loadStatusForTesting(options = {}) {
     };
   `;
   vm.runInContext(source, context, { filename: statusPath });
-  return { api: context.__statusTestApi, elements };
+  return { api: context.__statusTestApi, document, elements, timers };
 }
 
 test('status page keeps DOM hooks unique, present, and accessible', () => {
@@ -304,15 +315,167 @@ test('NWS normalization filters expired and cancelled alerts and constrains URLs
   assert.equal(alerts[0].headline, '<img src=x onerror=bad>');
 });
 
-test('county alert filtering supports explicit and statewide alerts', () => {
+const NOW = Date.parse('2026-09-13T12:00:00Z');
+const countyGeometry = JSON.parse(fs.readFileSync(path.join(projectRoot, 'data', 'nc-counties.geojson'), 'utf8'));
+
+function nwsFeature(id, overrides = {}, geometry = null) {
+  return {
+    id,
+    geometry,
+    properties: {
+      id,
+      event: 'Flood Watch',
+      severity: 'Moderate',
+      urgency: 'Expected',
+      status: 'Actual',
+      messageType: 'Alert',
+      sent: '2026-09-13T11:00:00Z',
+      expires: '2026-09-13T13:00:00Z',
+      areaDesc: 'Somewhere',
+      geocode: {},
+      affectedZones: [],
+      '@id': 'https://api.weather.gov/alerts/' + id,
+      ...overrides
+    }
+  };
+}
+
+function parseOne(api, feature, boundaries, zoneTable) {
+  return Array.from(api.parseNwsAlerts({ features: [feature] }, NOW, boundaries, zoneTable))[0];
+}
+
+function ids(list) { return Array.from(list, (alert) => alert.id); }
+
+test('SAME codes map an alert to specific counties', () => {
+  const { api } = loadStatusForTesting();
+  const alert = parseOne(api, nwsFeature('same', { geocode: { SAME: ['037183', '037063'] } }));
+  assert.equal(alert.geography, 'county');
+  assert.deepEqual(Array.from(alert.countyFips), ['37063', '37183']);
+  assert.deepEqual(ids(api.alertsForCounty([alert], '37183', NOW)), ['same']);
+  assert.deepEqual(ids(api.alertsForCounty([alert], '37001', NOW)), []);
+});
+
+test('UGC county codes map to FIPS and zone codes without a table do not guess', () => {
+  const { api } = loadStatusForTesting();
+  const ugc = parseOne(api, nwsFeature('ugc', { geocode: { UGC: ['NCC183', 'NCC063'] } }));
+  assert.equal(ugc.geography, 'county');
+  assert.deepEqual(Array.from(ugc.countyFips), ['37063', '37183']);
+
+  const zoneOnly = parseOne(api, nwsFeature('zone-only', { geocode: { UGC: ['NCZ041'] }, affectedZones: ['https://api.weather.gov/zones/forecast/NCZ041'] }));
+  assert.equal(zoneOnly.geography, 'unknown');
+  assert.deepEqual(ids(api.alertsForCounty([zoneOnly], '37183', NOW)), []);
+});
+
+test('affectedZones county URLs and an explicit zone table map forecast zones', () => {
+  const { api } = loadStatusForTesting();
+  const county = parseOne(api, nwsFeature('affected', { affectedZones: ['https://api.weather.gov/zones/county/NCC183'] }));
+  assert.equal(county.geography, 'county');
+  assert.deepEqual(Array.from(county.countyFips), ['37183']);
+
+  const zone = nwsFeature('zone', { geocode: { UGC: ['NCZ041'] }, affectedZones: ['https://api.weather.gov/zones/forecast/NCZ041'] });
+  const mapped = parseOne(api, zone, null, { NCZ041: '37183' });
+  assert.equal(mapped.geography, 'county');
+  assert.deepEqual(Array.from(mapped.countyFips), ['37183']);
+});
+
+test('storm-based polygons map to the counties they intersect', () => {
+  const { api } = loadStatusForTesting();
+  const wake = countyGeometry.features.find((feature) => feature.properties.GEOID === '37183');
+  const [lon, lat] = wake.geometry.type === 'Polygon' ? wake.geometry.coordinates[0][0] : wake.geometry.coordinates[0][0][0];
+  const d = 0.01;
+  const polygon = { type: 'Polygon', coordinates: [[[lon - d, lat - d], [lon + d, lat - d], [lon + d, lat + d], [lon - d, lat + d], [lon - d, lat - d]]] };
+  const withGeometry = parseOne(api, nwsFeature('poly', { event: 'Tornado Warning', severity: 'Extreme', areaDesc: 'Storm area' }, polygon), countyGeometry);
+  assert.equal(withGeometry.geography, 'county');
+  assert.ok(withGeometry.countyFips.includes('37183'));
+  assert.ok(withGeometry.countyFips.length < 10);
+  assert.ok(!withGeometry.countyFips.includes('37155') || withGeometry.countyFips.length < 10);
+  assert.deepEqual(ids(api.alertsForCounty([withGeometry], '37183', NOW)), ['poly']);
+
+  const farCounty = countyGeometry.features.map((f) => f.properties.GEOID).find((fips) => !withGeometry.countyFips.includes(fips));
+  assert.deepEqual(ids(api.alertsForCounty([withGeometry], farCounty, NOW)), []);
+
+  const contained = { type: 'Polygon', coordinates: [[[lon, lat], [lon + d, lat], [lon + d, lat + d], [lon, lat + d], [lon, lat]]] };
+  assert.ok(Array.from(parseOne(api, nwsFeature('inside', {}, contained), countyGeometry).countyFips).includes('37183'));
+  assert.equal(parseOne(api, nwsFeature('no-geometry', {}, polygon)).geography, 'unknown');
+});
+
+test('statewide alerts apply to every county', () => {
+  const { api } = loadStatusForTesting();
+  const all = Array.from({ length: 100 }, (_, index) => '037' + String(index * 2 + 1).padStart(3, '0'));
+  const bySame = parseOne(api, nwsFeature('all-same', { geocode: { SAME: all } }));
+  const byArea = parseOne(api, nwsFeature('by-area', { areaDesc: 'North Carolina' }));
+  assert.equal(bySame.geography, 'statewide');
+  assert.equal(byArea.geography, 'statewide');
+  assert.deepEqual(ids(api.alertsForCounty([bySame, byArea], '37001', NOW)), ['all-same', 'by-area']);
+  assert.deepEqual(ids(api.alertsForCounty([bySame, byArea], '37199', NOW)), ['all-same', 'by-area']);
+});
+
+test('unmappable alerts are unmatched, never shown in a county, and never counted or colored', () => {
+  const { api } = loadStatusForTesting();
+  const unknown = parseOne(api, nwsFeature('mystery', { event: 'Tornado Warning', severity: 'Extreme' }));
+  assert.equal(unknown.geography, 'unknown');
+  assert.deepEqual(Array.from(unknown.countyFips), []);
+  assert.deepEqual(ids(api.alertsForCounty([unknown], '37183', NOW)), []);
+  assert.deepEqual(ids(api.unmatchedAlerts([unknown], NOW)), ['mystery']);
+  api.state.activeLayer = 'weather';
+  api.state.liveAlerts = [{ ...unknown, expiresAt: new Date(Date.now() + 60_000).toISOString() }];
+  api.state.weatherSource = { lastSuccessAt: new Date().toISOString() };
+  assert.equal(api.mapBandForCounty('37183'), 'none');
+});
+
+test('cancelled and expired alerts are excluded by the parser and by county filtering', () => {
+  const { api } = loadStatusForTesting();
+  const same = { geocode: { SAME: ['037183'] } };
+  const parsed = Array.from(api.parseNwsAlerts({ features: [
+    nwsFeature('active', same),
+    nwsFeature('status-cancel', { ...same, status: 'Cancel' }),
+    nwsFeature('type-cancel', { ...same, messageType: 'Cancel' }),
+    nwsFeature('expired', { ...same, expires: '2026-09-13T11:00:00Z' }),
+    nwsFeature('ended', { ...same, ends: '2026-09-13T11:30:00Z' }),
+    nwsFeature('test-message', { ...same, status: 'Test' }),
+    nwsFeature('exercise', { ...same, status: 'Exercise' })
+  ] }, NOW), (alert) => alert.id);
+  assert.deepEqual(parsed, ['active']);
+
+  const future = '2026-09-13T13:00:00Z';
+  const base = { countyFips: ['37183'], geography: 'county', expiresAt: future, severity: 'Minor', urgency: 'Expected' };
+  const list = [
+    { ...base, id: 'ok', status: 'Actual' },
+    { ...base, id: 'cancel-status', status: 'Cancel' },
+    { ...base, id: 'cancel-type', status: 'Actual', messageType: 'Cancel' },
+    { ...base, id: 'expired', status: 'Actual', expiresAt: '2026-09-13T11:00:00Z' },
+    { ...base, id: 'ended', status: 'Actual', endsAt: '2026-09-13T11:00:00Z' },
+    { ...base, id: 'test-message', status: 'Test' }
+  ];
+  assert.deepEqual(ids(api.alertsForCounty(list, '37183', NOW)), ['ok']);
+  assert.deepEqual(ids(api.unmatchedAlerts([{ ...base, id: 'u', geography: 'unknown', countyFips: [], status: 'Cancel' }], NOW)), []);
+});
+
+test('legacy snapshot alerts without geography are county-scoped or unmatched, never statewide', () => {
   const { api } = loadStatusForTesting();
   const future = new Date(Date.now() + 60_000).toISOString();
   const alerts = [
     { id: 'wake', countyFips: ['37183'], expiresAt: future, status: 'Actual', severity: 'Severe', urgency: 'Immediate' },
-    { id: 'statewide', countyFips: [], expiresAt: future, status: 'Actual', severity: 'Minor', urgency: 'Expected' },
-    { id: 'durham', countyFips: ['37063'], expiresAt: future, status: 'Actual', severity: 'Moderate', urgency: 'Expected' }
+    { id: 'legacy-empty', countyFips: [], expiresAt: future, status: 'Actual', severity: 'Minor', urgency: 'Expected' },
+    { id: 'durham', countyFips: ['37063'], expiresAt: future, status: 'Actual', severity: 'Moderate', urgency: 'Expected' },
+    { id: 'statewide', geography: 'statewide', countyFips: [], expiresAt: future, status: 'Actual', severity: 'Minor', urgency: 'Expected' }
   ];
-  assert.deepEqual(Array.from(api.alertsForCounty(alerts, '37183'), (alert) => alert.id), ['wake', 'statewide']);
+  assert.deepEqual(ids(api.alertsForCounty(alerts, '37183')), ['wake', 'statewide']);
+  assert.deepEqual(ids(api.unmatchedAlerts(alerts)), ['legacy-empty']);
+});
+
+test('the warning banner follows county-scoped alerts only', () => {
+  const { api, elements } = loadStatusForTesting();
+  const future = new Date(Date.now() + 60_000).toISOString();
+  api.state.snapshot = {
+    sources: { power: { lastSuccessAt: new Date().toISOString() }, weather: { lastSuccessAt: new Date().toISOString() } },
+    power: [],
+    alerts: [{ id: 'tor', event: 'Tornado Warning', headline: 'Wake only', status: 'Actual', geography: 'county', countyFips: ['37183'], expiresAt: future, severity: 'Extreme', urgency: 'Immediate', areaDescription: 'Wake' }]
+  };
+  api.state.selectedFips = '37063';
+  assert.equal(ids(api.alertsForCounty(api.state.snapshot.alerts, api.state.selectedFips)).length, 0);
+  assert.equal(ids(api.alertsForCounty(api.state.snapshot.alerts, '37183')).length, 1);
+  assert.ok(elements);
 });
 
 test('stale zero values remain explicitly labeled as last known', () => {
@@ -373,4 +536,106 @@ test('untrusted links and markup are constrained', () => {
   assert.equal(api.safeUrl('http://example.com'), '');
   assert.equal(api.safeUrl('javascript:alert(1)'), '');
   assert.doesNotMatch(source, /\.innerHTML\s*=/, 'status rendering should keep upstream text out of HTML parsing');
+});
+
+function snapshotAt(generatedAt, powerAt = generatedAt, extra = {}) {
+  return {
+    schemaVersion: 1,
+    state: 'NC',
+    generatedAt,
+    sources: { power: { lastSuccessAt: powerAt }, weather: { lastSuccessAt: generatedAt } },
+    power: [{ countyFips: '37183', countyName: 'Wake', customersOut: 0 }],
+    alerts: [],
+    ...extra
+  };
+}
+
+test('snapshot refresh failure retains previously loaded data', async () => {
+  const good = snapshotAt('2026-09-13T12:00:00Z');
+  const { api } = loadStatusForTesting({ fetch: async () => { throw new Error('offline'); } });
+  api.state.snapshot = good;
+  await assert.rejects(api.loadStatusSnapshot({ quiet: true }), /offline/);
+  assert.equal(api.state.snapshot, good);
+  assert.equal(api.state.snapshotError, true);
+  const bad = loadStatusForTesting({ fetch: async () => ({ ok: true, json: async () => ({ schemaVersion: 2 }) }) });
+  bad.api.state.snapshot = good;
+  await assert.rejects(bad.api.loadStatusSnapshot({ quiet: true }), /unexpected format/);
+  assert.equal(bad.api.state.snapshot, good);
+});
+
+test('an older or unavailable snapshot never replaces newer held data', async () => {
+  const held = snapshotAt('2026-09-13T12:00:00Z');
+  const older = snapshotAt('2026-09-13T11:00:00Z');
+  const placeholder = snapshotAt('1970-01-01T00:00:00.000Z', undefined, { sources: { power: { freshness: 'unavailable' }, weather: { freshness: 'unavailable' } } });
+  const newer = snapshotAt('2026-09-13T12:05:00Z');
+  let response = older;
+  const { api } = loadStatusForTesting({ fetch: async () => ({ ok: true, json: async () => response }) });
+  api.state.snapshot = held;
+  assert.equal(await api.loadStatusSnapshot({ quiet: true }), held);
+  assert.equal(api.state.snapshot, held);
+  response = placeholder;
+  await api.loadStatusSnapshot({ quiet: true });
+  assert.equal(api.state.snapshot, held);
+  assert.ok(api.state.snapshotCheckedAt, 'last-checked time is recorded separately');
+  response = newer;
+  await api.loadStatusSnapshot({ quiet: true });
+  assert.equal(api.state.snapshot, newer);
+  assert.equal(api.isSnapshotAcceptable(snapshotAt('2026-09-13T12:10:00Z', '2026-09-13T11:00:00Z'), newer), false);
+});
+
+test('a second snapshot refresh while one is in flight is a no-op', async () => {
+  let calls = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const { api } = loadStatusForTesting({ fetch: async () => { calls += 1; await gate; return { ok: true, json: async () => snapshotAt('2026-09-13T12:00:00Z') }; } });
+  const first = api.loadStatusSnapshot({ quiet: true });
+  const second = api.loadStatusSnapshot({ quiet: true });
+  assert.equal(first, second);
+  release();
+  await first;
+  assert.equal(calls, 1);
+  await api.loadStatusSnapshot({ quiet: true });
+  assert.equal(calls, 2);
+});
+
+test('hidden tabs stop the single refresh timer and visible tabs restart it', () => {
+  const { api, document, timers } = loadStatusForTesting({ fetch: async () => { throw new Error('offline'); } });
+  api.startAutoRefresh();
+  api.startAutoRefresh();
+  assert.equal(timers.set.length, 2);
+  assert.equal(timers.cleared.length, 1, 'restarting clears the previous timer');
+  assert.equal(timers.set[1].delay, 5 * 60 * 1000);
+  document.hidden = true;
+  api.handleVisibilityChange();
+  assert.equal(api.state.refreshTimer, 0);
+  api.startAutoRefresh();
+  assert.equal(timers.set.length, 2, 'no timer starts while hidden');
+  document.hidden = false;
+  api.state.snapshotLastAttemptMs = Date.now();
+  api.state.weatherLastAttemptMs = Date.now();
+  api.handleVisibilityChange();
+  assert.equal(timers.set.length, 3);
+});
+
+test('refresh is skipped while the browser reports offline', async () => {
+  let calls = 0;
+  const { api } = loadStatusForTesting({ navigator: { onLine: false }, fetch: async () => { calls += 1; throw new Error('offline'); } });
+  await api.refreshSourcesQuietly();
+  assert.equal(calls, 0);
+});
+
+test('a stale or unavailable zero-outage county is last-known, not an all-clear', () => {
+  const { api } = loadStatusForTesting();
+  const source = { lastSuccessAt: new Date(Date.now() - 50 * 60_000).toISOString() };
+  assert.match(api.metricSummary(0, 'stale', source, 'reported'), /^Last known: 0 reported as of .+ data is stale/);
+  assert.match(api.metricSummary(0, 'unavailable', source, 'reported'), /^Last known: 0 reported as of /);
+  api.state.activeLayer = 'power';
+  api.state.snapshot = snapshotAt('2026-09-13T12:00:00Z');
+  api.state.snapshot.sources.power = source;
+  assert.equal(api.mapBandForCounty('37183'), 'unknown');
+  api.state.snapshot.power[0].customersOut = 5;
+  assert.equal(api.mapBandForCounty('37183'), 'low');
+  api.state.snapshot.sources.power = { lastSuccessAt: new Date().toISOString() };
+  api.state.snapshot.power[0].customersOut = 0;
+  assert.equal(api.mapBandForCounty('37183'), 'none');
 });

@@ -9,6 +9,7 @@ const THEME_STORAGE_KEY = 'theme';
 const COUNTY_STORAGE_KEY = 'local-weather-nc-county';
 const DEFAULT_COUNTY_FIPS = '37183';
 const WEATHER_REFRESH_MS = 5 * 60 * 1000;
+const RESUME_REFRESH_MIN_MS = 60 * 1000;
 const REQUEST_TIMEOUT_MS = 12 * 1000;
 const POWER_FRESH_MS = 45 * 60 * 1000;
 const POWER_STALE_MS = 60 * 60 * 1000;
@@ -31,7 +32,21 @@ const COUNTY_NAMES = [
 const NC_COUNTIES = COUNTY_NAMES.map(function (name, index) {
   return { name: name, fips: '37' + String(index * 2 + 1).padStart(3, '0') };
 });
+// Forecast-zone (NCZ###) to county lookups are intentionally empty: no reliable source was available to
+// derive them and mappings are never guessed. Zone-only alerts resolve through SAME/UGC county codes,
+// affectedZones county URLs, or polygon geometry; otherwise they are listed as unmatched.
+const NC_ZONE_TO_COUNTY_FIPS = {};
 const COUNTY_BY_FIPS = new Map(NC_COUNTIES.map(function (county) { return [county.fips, county]; }));
+// Shared with scripts/nc-status.mjs; status.html loads alert-geography.js before this script.
+const alertGeographyApi = globalThis.NcAlertGeography;
+const geometryPolygons = alertGeographyApi.geometryPolygons;
+const pointInPolygon = alertGeographyApi.pointInPolygon;
+const alertGeography = alertGeographyApi.alertGeography;
+const isAlertActive = alertGeographyApi.isAlertActive;
+const deriveAlertGeography = alertGeographyApi.createAlertGeography({
+  countyFips: NC_COUNTIES.map(function (county) { return county.fips; }),
+  zoneTable: NC_ZONE_TO_COUNTY_FIPS
+}).deriveAlertGeography;
 const numberFormatter = new Intl.NumberFormat('en-US');
 
 const statusState = {
@@ -43,17 +58,24 @@ const statusState = {
   map: null,
   mapLayer: null,
   refreshing: false,
+  refreshTimer: 0,
   selectedFips: DEFAULT_COUNTY_FIPS,
   snapshot: null,
+  snapshotCheckedAt: '',
+  snapshotController: null,
   snapshotError: false,
-  weatherSource: null,
-  weatherTimer: 0
+  snapshotLastAttemptMs: 0,
+  snapshotPromise: null,
+  weatherLastAttemptMs: 0,
+  weatherPromise: null,
+  weatherSource: null
 };
 
 const statusEl = {
   alertList: document.querySelector('#statusAlertList'),
   alertSummary: document.querySelector('#alertSummary'),
   alertTotal: document.querySelector('#alertTotal'),
+  unmatchedAlerts: document.querySelector('#statusUnmatchedAlerts'),
   countyList: document.querySelector('#countyList'),
   countySelect: document.querySelector('#countySelect'),
   deviceLocationButton: document.querySelector('#deviceLocationButton'),
@@ -98,15 +120,14 @@ statusEl.countySelect.addEventListener('change', function () {
 statusEl.rememberCounty.addEventListener('change', handleRememberCounty);
 statusEl.powerLayerButton.addEventListener('click', function () { setMapLayer('power'); });
 statusEl.weatherLayerButton.addEventListener('click', function () { setMapLayer('weather'); });
-document.addEventListener('visibilitychange', function () {
-  if (!document.hidden) refreshWeatherAlerts({ quiet: true }).catch(function () {});
-});
+document.addEventListener('visibilitychange', handleVisibilityChange);
 window.addEventListener('offline', function () {
   showToast('You appear to be offline. Last-known county information remains visible.');
 });
 window.addEventListener('online', function () {
-  showToast('Connection restored. Refreshing weather alerts.');
-  refreshWeatherAlerts({ quiet: true }).catch(function () {});
+  showToast('Connection restored. Refreshing county status and weather alerts.');
+  refreshSourcesQuietly();
+  startAutoRefresh();
 });
 
 async function initStatusPage() {
@@ -121,10 +142,48 @@ async function initStatusPage() {
     refreshWeatherAlerts({ quiet: true })
   ]);
 
-  window.clearInterval(statusState.weatherTimer);
-  statusState.weatherTimer = window.setInterval(function () {
-    if (!document.hidden) refreshWeatherAlerts({ quiet: true }).catch(function () {});
+  startAutoRefresh();
+}
+
+function isOffline() {
+  return typeof navigator !== 'undefined' && navigator && navigator.onLine === false;
+}
+
+// Refreshes the deployed snapshot and the live NWS alerts independently; neither failure blocks the other.
+function refreshSourcesQuietly() {
+  if (isOffline()) return Promise.resolve([]);
+  return Promise.allSettled([
+    loadStatusSnapshot({ quiet: true }),
+    refreshWeatherAlerts({ quiet: true })
+  ]);
+}
+
+function stopAutoRefresh() {
+  if (statusState.refreshTimer) window.clearInterval(statusState.refreshTimer);
+  statusState.refreshTimer = 0;
+}
+
+// A single timer drives both sources and only runs while the tab is visible.
+function startAutoRefresh() {
+  stopAutoRefresh();
+  if (document.hidden) return;
+  statusState.refreshTimer = window.setInterval(function () {
+    if (document.hidden) {
+      stopAutoRefresh();
+      return;
+    }
+    refreshSourcesQuietly();
   }, WEATHER_REFRESH_MS);
+}
+
+function handleVisibilityChange() {
+  if (document.hidden) {
+    stopAutoRefresh();
+    return;
+  }
+  const oldest = Math.min(statusState.snapshotLastAttemptMs, statusState.weatherLastAttemptMs);
+  if (Date.now() - oldest >= RESUME_REFRESH_MIN_MS) refreshSourcesQuietly();
+  startAutoRefresh();
 }
 
 function getStoredTheme() {
@@ -250,24 +309,66 @@ function selectCounty(fips, message) {
   return true;
 }
 
-async function loadStatusSnapshot(options) {
+function snapshotTimestamp(snapshot, kind) {
+  const value = kind === 'power'
+    ? snapshot && snapshot.sources && snapshot.sources.power && snapshot.sources.power.lastSuccessAt
+    : snapshot && snapshot.generatedAt;
+  const time = Date.parse(value || '');
+  return Number.isFinite(time) ? time : null;
+}
+
+// A fetched snapshot replaces the held one only if it is not older (by generation or power success time).
+function isSnapshotAcceptable(candidate, held) {
+  if (!isStatusSnapshot(candidate)) return false;
+  if (!held) return true;
+  const kinds = ['generated', 'power'];
+  return kinds.every(function (kind) {
+    const next = snapshotTimestamp(candidate, kind === 'power' ? 'power' : 'generated');
+    const current = snapshotTimestamp(held, kind === 'power' ? 'power' : 'generated');
+    if (current === null) return true;
+    return next !== null && next >= current;
+  });
+}
+
+function loadStatusSnapshot(options) {
+  if (statusState.snapshotPromise) return statusState.snapshotPromise;
   const quiet = options && options.quiet;
-  try {
-    const separator = STATUS_SNAPSHOT_URL.includes('?') ? '&' : '?';
-    const snapshot = await fetchJson(STATUS_SNAPSHOT_URL + separator + 'v=' + Date.now(), { cache: 'no-store' });
-    if (!isStatusSnapshot(snapshot)) throw new Error('The status snapshot has an unexpected format.');
-    statusState.snapshot = snapshot;
-    statusState.snapshotError = false;
-    if (statusState.liveAlerts === null) statusState.weatherSource = snapshot.sources.weather;
-    if (!quiet) setStatusMessage('Official county status loaded. Source age is shown with each section.');
-    renderStatus();
-    return snapshot;
-  } catch (error) {
-    statusState.snapshotError = true;
-    if (!quiet) setStatusMessage('The saved county snapshot could not be loaded. Live weather alerts may still be available.');
-    renderStatus();
-    throw error;
-  }
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  statusState.snapshotController = controller;
+  statusState.snapshotLastAttemptMs = Date.now();
+  const promise = (async function () {
+    try {
+      const separator = STATUS_SNAPSHOT_URL.includes('?') ? '&' : '?';
+      const snapshot = await fetchJson(STATUS_SNAPSHOT_URL + separator + 'v=' + Date.now(), {
+        cache: 'no-store',
+        signal: controller ? controller.signal : undefined
+      });
+      if (!isStatusSnapshot(snapshot)) throw new Error('The status snapshot has an unexpected format.');
+      statusState.snapshotCheckedAt = new Date().toISOString();
+      if (!isSnapshotAcceptable(snapshot, statusState.snapshot)) {
+        // Older or regressed data never replaces a good snapshot already held.
+        if (!quiet) setStatusMessage('The saved county snapshot was older than the data already shown, so it was ignored.');
+        renderStatus();
+        return statusState.snapshot;
+      }
+      statusState.snapshot = snapshot;
+      statusState.snapshotError = false;
+      if (statusState.liveAlerts === null) statusState.weatherSource = snapshot.sources.weather;
+      if (!quiet) setStatusMessage('Official county status loaded. Source age is shown with each section.');
+      renderStatus();
+      return snapshot;
+    } catch (error) {
+      statusState.snapshotError = true;
+      if (!quiet) setStatusMessage('The saved county snapshot could not be loaded. Last-known county information remains visible.');
+      renderStatus();
+      throw error;
+    } finally {
+      statusState.snapshotPromise = null;
+      statusState.snapshotController = null;
+    }
+  })();
+  statusState.snapshotPromise = promise;
+  return promise;
 }
 
 async function loadCountyGeometry() {
@@ -292,15 +393,26 @@ async function loadCountyGeometry() {
   return statusState.geometryPromise;
 }
 
-async function refreshWeatherAlerts(options) {
+function refreshWeatherAlerts(options) {
+  if (statusState.weatherPromise) return statusState.weatherPromise;
+  statusState.weatherPromise = fetchWeatherAlerts(options).finally(function () {
+    statusState.weatherPromise = null;
+  });
+  return statusState.weatherPromise;
+}
+
+async function fetchWeatherAlerts(options) {
   const quiet = options && options.quiet;
   const attemptedAt = new Date().toISOString();
+  statusState.weatherLastAttemptMs = Date.now();
   try {
+    // County boundaries let polygon-only alerts be mapped to counties; alerts still load without them.
+    if (!statusState.geometry) await loadCountyGeometry().catch(function () {});
     const payload = await fetchJson(NWS_ALERTS_URL, {
       cache: 'no-store',
       headers: { Accept: 'application/geo+json' }
     });
-    statusState.liveAlerts = parseNwsAlerts(payload, Date.now());
+    statusState.liveAlerts = parseNwsAlerts(payload, Date.now(), statusState.geometry);
     statusState.weatherSource = {
       name: 'National Weather Service',
       sourceUrl: NWS_ALERTS_URL,
@@ -451,34 +563,13 @@ function isCountyGeometry(value) {
   );
 }
 
-function pointInRing(longitude, latitude, ring) {
-  let inside = false;
-  for (let index = 0, previous = ring.length - 1; index < ring.length; previous = index++) {
-    const x = ring[index][0];
-    const y = ring[index][1];
-    const previousX = ring[previous][0];
-    const previousY = ring[previous][1];
-    if ((y > latitude) !== (previousY > latitude) &&
-      longitude < (previousX - x) * (latitude - y) / (previousY - y) + x) {
-      inside = !inside;
-    }
-  }
-  return inside;
-}
-
-function pointInPolygon(longitude, latitude, polygon) {
-  return Array.isArray(polygon) && polygon.length > 0 &&
-    pointInRing(longitude, latitude, polygon[0]) &&
-    !polygon.slice(1).some(function (hole) { return pointInRing(longitude, latitude, hole); });
-}
-
 function countyFipsAt(longitude, latitude, boundaries) {
   if (!Number.isFinite(longitude) || !Number.isFinite(latitude) || !Array.isArray(boundaries && boundaries.features)) {
     return undefined;
   }
   for (const feature of boundaries.features) {
     const geometry = feature.geometry;
-    const polygons = geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.type === 'MultiPolygon' ? geometry.coordinates : [];
+    const polygons = geometryPolygons(geometry);
     if (polygons.some(function (polygon) { return pointInPolygon(longitude, latitude, polygon); })) {
       const fips = String(feature.properties && feature.properties.GEOID || '');
       return COUNTY_BY_FIPS.has(fips) ? fips : undefined;
@@ -487,7 +578,7 @@ function countyFipsAt(longitude, latitude, boundaries) {
   return undefined;
 }
 
-function parseNwsAlerts(input, nowMs) {
+function parseNwsAlerts(input, nowMs, boundaries, zoneTable) {
   const features = input && input.features;
   if (!Array.isArray(features)) throw new Error('The NWS alert response has an unexpected format.');
   const currentTime = Number.isFinite(nowMs) ? nowMs : Date.now();
@@ -499,11 +590,7 @@ function parseNwsAlerts(input, nowMs) {
     const event = cleanText(properties.event);
     const expiresAt = validIso(properties.expires);
     if (!id || !event || !expiresAt) throw new Error('The NWS alert response is missing required fields.');
-    const sameCodes = properties.geocode && properties.geocode.SAME;
-    const countyFips = Array.isArray(sameCodes) ? sameCodes.map(function (code) {
-      const value = String(code);
-      return /^037\d{3}$/.test(value) ? value.slice(1) : value;
-    }).filter(function (code) { return COUNTY_BY_FIPS.has(code); }) : [];
+    const mapped = deriveAlertGeography(properties, feature.geometry, boundaries, zoneTable);
     const suppliedSeverity = cleanText(properties.severity);
     const severity = ['Extreme', 'Severe', 'Moderate', 'Minor'].includes(suppliedSeverity) ? suppliedSeverity : 'Unknown';
     return {
@@ -514,20 +601,22 @@ function parseNwsAlerts(input, nowMs) {
       urgency: cleanText(properties.urgency) || 'Unknown',
       certainty: cleanText(properties.certainty) || 'Unknown',
       status: cleanText(properties.status) || 'Actual',
+      messageType: cleanText(properties.messageType) || undefined,
       sentAt: validIso(properties.sent) || expiresAt,
       effectiveAt: validIso(properties.effective),
       onsetAt: validIso(properties.onset),
       expiresAt: expiresAt,
       endsAt: validIso(properties.ends),
       areaDescription: cleanText(properties.areaDesc) || 'North Carolina',
-      countyFips: Array.from(new Set(countyFips)),
+      geography: mapped.geography,
+      countyFips: mapped.countyFips,
       description: cleanText(properties.description) || undefined,
       instruction: cleanText(properties.instruction) || undefined,
       senderName: cleanText(properties.senderName) || 'National Weather Service',
       sourceUrl: safeUrl(cleanText(properties['@id'])) || safeUrl('https://api.weather.gov/alerts/' + encodeURIComponent(id))
     };
   }).filter(function (alert) {
-    return alert.status !== 'Cancel' && Date.parse(alert.expiresAt) > currentTime;
+    return isAlertActive(alert, currentTime);
   });
 }
 
@@ -558,12 +647,18 @@ function weatherBand(alerts) {
 }
 
 function alertsForCounty(alerts, fips, nowMs) {
-  const currentTime = Number.isFinite(nowMs) ? nowMs : Date.now();
   return (Array.isArray(alerts) ? alerts : []).filter(function (alert) {
-    const applies = !Array.isArray(alert.countyFips) || alert.countyFips.length === 0 || alert.countyFips.includes(fips);
-    return applies && Date.parse(alert.expiresAt) > currentTime && alert.status !== 'Cancel';
+    if (!isAlertActive(alert, nowMs)) return false;
+    const geography = alertGeography(alert);
+    return geography === 'statewide' || (geography === 'county' && alert.countyFips.includes(fips));
   }).sort(function (left, right) {
     return alertRank(left) - alertRank(right) || Date.parse(left.expiresAt) - Date.parse(right.expiresAt);
+  });
+}
+
+function unmatchedAlerts(alerts, nowMs) {
+  return (Array.isArray(alerts) ? alerts : []).filter(function (alert) {
+    return isAlertActive(alert, nowMs) && alertGeography(alert) === 'unknown';
   });
 }
 
@@ -622,6 +717,7 @@ function renderStatus() {
   statusEl.weatherFreshness.dataset.state = weatherFreshness;
 
   renderAlertList(alerts, weatherFreshness, weatherSource);
+  renderUnmatchedAlerts(unmatchedAlerts(getVisibleAlerts(), now));
   renderSourceState(powerFreshness, weatherFreshness, powerSource, weatherSource);
   renderWarningBanner(alerts, weatherFreshness);
   renderCountySelection();
@@ -631,8 +727,9 @@ function renderStatus() {
 function metricSummary(value, freshness, source, noun) {
   if (value === null) return freshness === 'fresh' ? 'County value is missing from current data.' : 'No last-known county value is available.';
   if (freshness === 'fresh') return noun + ' · updated ' + formatAge(source && source.lastSuccessAt);
-  if (freshness === 'stale') return 'Last known · source is stale (' + formatAge(source && source.lastSuccessAt) + ')';
-  return 'Last known · current update unavailable (' + formatAge(source && source.lastSuccessAt) + ')';
+  const asOf = formatDateTime(source && source.lastSuccessAt);
+  if (freshness === 'stale') return 'Last known: ' + numberFormatter.format(value) + ' ' + noun + ' as of ' + asOf + ' \u2014 data is stale';
+  return 'Last known: ' + numberFormatter.format(value) + ' ' + noun + ' as of ' + asOf + ' \u2014 current update unavailable';
 }
 
 function powerDetailMessage(value, freshness, source) {
@@ -711,6 +808,40 @@ function renderAlertList(alerts, freshness, source) {
   statusEl.alertList.replaceChildren(fragment);
 }
 
+function renderUnmatchedAlerts(unmatched) {
+  const container = statusEl.unmatchedAlerts;
+  if (!container) return;
+  if (!unmatched.length) {
+    container.classList.add('hidden');
+    container.replaceChildren();
+    return;
+  }
+  const message = document.createElement('p');
+  message.className = 'status-alert-empty';
+  message.textContent = unmatched.length + (unmatched.length === 1 ? ' NWS alert' : ' NWS alerts') +
+    ' could not be matched to a county and ' + (unmatched.length === 1 ? 'is' : 'are') +
+    ' not included in county totals or the map. Check the official details:';
+  const list = document.createElement('ul');
+  list.className = 'status-unmatched-list';
+  unmatched.forEach(function (alert) {
+    const item = document.createElement('li');
+    const url = safeUrl(alert.sourceUrl);
+    if (url) {
+      const link = document.createElement('a');
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      link.textContent = alert.event + ' \u2014 ' + alert.areaDescription + ' (official NWS details)';
+      item.append(link);
+    } else {
+      item.textContent = alert.event + ' \u2014 ' + alert.areaDescription;
+    }
+    list.append(item);
+  });
+  container.replaceChildren(message, list);
+  container.classList.remove('hidden');
+}
+
 function renderSourceState(powerFreshness, weatherFreshness, powerSource, weatherSource) {
   const freshnessRank = { fresh: 0, stale: 1, unavailable: 2 };
   const overall = freshnessRank[powerFreshness] >= freshnessRank[weatherFreshness] ? powerFreshness : weatherFreshness;
@@ -728,12 +859,13 @@ function renderSourceState(powerFreshness, weatherFreshness, powerSource, weathe
       : 'One or more sources cannot confirm current conditions. Last-known values remain visible and are not an all-clear.';
   }
 
-  renderSourceParagraph(statusEl.powerSourceStatus, 'NC Emergency Management power data', powerFreshness, powerSource);
+  renderSourceParagraph(statusEl.powerSourceStatus, 'NC Emergency Management power data', powerFreshness, powerSource,
+    statusState.snapshotCheckedAt ? 'Snapshot last checked ' + formatAge(statusState.snapshotCheckedAt) + '. ' : '');
   renderSourceParagraph(statusEl.weatherSourceStatus, 'National Weather Service alerts', weatherFreshness, weatherSource);
 }
 
-function renderSourceParagraph(element, label, freshness, source) {
-  const text = document.createTextNode(label + ': ' + freshness + ', last successful update ' + formatAge(source && source.lastSuccessAt) + '. ');
+function renderSourceParagraph(element, label, freshness, source, extra) {
+  const text = document.createTextNode(label + ': ' + freshness + ', last successful update ' + formatAge(source && source.lastSuccessAt) + '. ' + (extra || ''));
   const url = safeUrl(source && source.sourceUrl);
   if (!url) {
     element.replaceChildren(text);
@@ -870,12 +1002,17 @@ function countyFeatureStyle(feature) {
 function mapBandForCounty(fips) {
   const freshness = mapFreshnessForLayer();
   if (freshness === 'unavailable') return 'unknown';
+  let band;
   if (statusState.activeLayer === 'power') {
     const record = getCountyPower(fips);
-    return record ? powerBand(Number(record.customersOut)) : 'unknown';
+    band = record ? powerBand(Number(record.customersOut)) : 'unknown';
+  } else if (!statusState.snapshot && statusState.liveAlerts === null) {
+    band = 'unknown';
+  } else {
+    band = weatherBand(alertsForCounty(getVisibleAlerts(), fips, Date.now()));
   }
-  if (!statusState.snapshot && statusState.liveAlerts === null) return 'unknown';
-  return weatherBand(alertsForCounty(getVisibleAlerts(), fips, Date.now()));
+  // A stale source cannot confirm "none", so the all-clear band is withheld.
+  return freshness === 'stale' && band === 'none' ? 'unknown' : band;
 }
 
 function mapFreshnessForLayer() {
@@ -931,8 +1068,8 @@ function renderMapLegend() {
     ? 'Map colors use fixed reported-customer bands, so they remain comparable between updates.'
     : 'Map colors show the highest active NWS alert severity applying to each county.';
   const staleNote = statusState.activeLayer === 'power'
-    ? 'Map colors show last-known reported-customer bands; the power source is stale.'
-    : 'Map colors show last-known alert severity; the weather source is stale.';
+    ? 'Map colors show last-known reported-customer bands; the power source is stale, so counties with no reported outages are shown as no current data.'
+    : 'Map colors show last-known alert severity; the weather source is stale, so counties without alerts are shown as no current data.';
   const unavailableNote = statusState.activeLayer === 'power'
     ? 'Current power map data is unavailable, so counties are shown as no current data.'
     : 'Current weather map data is unavailable, so counties are shown as no current data.';
@@ -948,6 +1085,11 @@ function cssValue(name) {
 async function fetchJson(url, options) {
   const controller = new AbortController();
   const timeout = window.setTimeout(function () { controller.abort(); }, REQUEST_TIMEOUT_MS);
+  const external = options && options.signal;
+  if (external) {
+    if (external.aborted) controller.abort();
+    else external.addEventListener('abort', function () { controller.abort(); });
+  }
   const config = Object.assign({}, options || {}, { signal: controller.signal });
   try {
     const response = await fetch(url, config);

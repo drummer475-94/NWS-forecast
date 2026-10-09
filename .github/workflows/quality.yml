@@ -21,10 +21,33 @@ jobs:
       - name: Check JavaScript syntax
         run: |
           node --check app.js
+          node --check alert-geography.js
           node --check status.js
           node --check scripts/nc-status.mjs
           node --check scripts/refresh-nc-status.mjs
           node --check scripts/verify-nc-status.mjs
           node --check scripts/check-nc-status.mjs
+          node --check tests/browser/smoke.mjs
       - name: Run regression tests
         run: node --test
+
+  browser-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      # Installed outside the workspace: the repository intentionally has no package.json or lockfile.
+      - name: Install Playwright and Leaflet
+        run: npm install --prefix "$RUNNER_TEMP/smoke" --no-save --no-audit --no-fund playwright@1.64.0 leaflet@1.9.4
+      - name: Install Chromium
+        run: '"$RUNNER_TEMP/smoke/node_modules/.bin/playwright" install --with-deps chromium'
+      - name: Run browser smoke tests
+        env:
+          PLAYWRIGHT_MODULE_DIR: ${{ runner.temp }}/smoke
+          LEAFLET_DIR: ${{ runner.temp }}/smoke/node_modules/leaflet/dist
+        run: node tests/browser/smoke.mjs

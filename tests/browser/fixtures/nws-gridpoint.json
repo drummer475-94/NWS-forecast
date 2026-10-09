@@ -1,0 +1,1 @@
+{"properties": {"quantitativePrecipitation": {"uom": "wmoUnit:mm", "values": [{"validTime": "{{now-1h}}/PT6H", "value": 2.5}, {"validTime": "{{now+5h}}/PT6H", "value": 6.35}, {"validTime": "{{now+11h}}/PT12H", "value": 1.27}, {"validTime": "{{now+23h}}/PT6H", "value": 0}]}}}

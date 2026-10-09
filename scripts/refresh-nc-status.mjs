@@ -47,7 +47,7 @@ export async function fetchSource(fetchImpl, url, format, headers = {}, { wait =
   }
 }
 
-export async function buildSnapshot({ fetchImpl = fetch, at = new Date(), countyCatalog, retryOptions } = {}) {
+export async function buildSnapshot({ fetchImpl = fetch, at = new Date(), countyCatalog, countyGeometry, retryOptions } = {}) {
   if (!Array.isArray(countyCatalog) || countyCatalog.length !== 100) {
     throw new Error("A complete North Carolina county catalog is required.");
   }
@@ -60,7 +60,7 @@ export async function buildSnapshot({ fetchImpl = fetch, at = new Date(), county
     }, retryOptions),
   ]);
   const power = parseNcem(powerPayload, countyCatalog).sort((left, right) => left.countyName.localeCompare(right.countyName));
-  const alerts = parseNws(weatherPayload, at.valueOf());
+  const alerts = parseNws(weatherPayload, at.valueOf(), { boundaries: countyGeometry });
   const source = (name, sourceUrl) => ({
     name,
     sourceUrl,
@@ -91,7 +91,7 @@ export async function refreshSnapshot({
 } = {}) {
   const geometry = JSON.parse(await readFile(geometryPath, "utf8"));
   const countyCatalog = countyCatalogFromGeoJson(geometry);
-  const snapshot = await buildSnapshot({ fetchImpl, at, countyCatalog, retryOptions });
+  const snapshot = await buildSnapshot({ fetchImpl, at, countyCatalog, countyGeometry: geometry, retryOptions });
   const resolvedOutput = resolve(outputPath);
   const temporaryOutput = `${resolvedOutput}.${process.pid}.tmp`;
   await mkdir(dirname(resolvedOutput), { recursive: true });

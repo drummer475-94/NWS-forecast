@@ -378,3 +378,102 @@ test("monitor CLI reports overdue and unverifiable updates with failure exit cod
   assert.match(written, /OVERDUE/);
   assert.match(written, /could not be verified/);
 });
+
+const alertAt = (id, overrides = {}, geometry = null) => ({
+  id,
+  geometry,
+  properties: { ...activeAlertPayload().features[0].properties, id, areaDesc: "Somewhere", geocode: {}, ...overrides },
+});
+const parseWith = (features, options) => parseNws({ features }, Date.parse("2026-09-13T12:00:00Z"), options);
+
+test("NWS county mapping uses SAME, UGC county codes, and affectedZones county URLs", () => {
+  const [same, ugc, affected] = parseWith([
+    alertAt("same", { geocode: { SAME: ["037183", "037063"] } }),
+    alertAt("ugc", { geocode: { UGC: ["NCC183"] } }),
+    alertAt("affected", { affectedZones: ["https://api.weather.gov/zones/county/NCC063"] }),
+  ]);
+  assert.deepEqual([same.geography, same.countyFips], ["county", ["37063", "37183"]]);
+  assert.deepEqual([ugc.geography, ugc.countyFips], ["county", ["37183"]]);
+  assert.deepEqual([affected.geography, affected.countyFips], ["county", ["37063"]]);
+});
+
+test("NWS forecast zones map only through an explicit table and are otherwise unmatched", () => {
+  const feature = alertAt("zone", { geocode: { UGC: ["NCZ041"] }, affectedZones: ["https://api.weather.gov/zones/forecast/NCZ041"] });
+  const [unmapped] = parseWith([feature]);
+  assert.deepEqual([unmapped.geography, unmapped.countyFips], ["unknown", []]);
+  const [mapped] = parseWith([feature], { zoneTable: { NCZ041: "37183" } });
+  assert.deepEqual([mapped.geography, mapped.countyFips], ["county", ["37183"]]);
+});
+
+test("NWS storm polygons map to intersecting counties when boundaries are supplied", () => {
+  const wake = geometry.features.find((feature) => feature.properties.GEOID === "37183");
+  const [lon, lat] = wake.geometry.type === "Polygon" ? wake.geometry.coordinates[0][0] : wake.geometry.coordinates[0][0][0];
+  const d = 0.01;
+  const polygon = { type: "Polygon", coordinates: [[[lon - d, lat - d], [lon + d, lat - d], [lon + d, lat + d], [lon - d, lat + d], [lon - d, lat - d]]] };
+  const [mapped] = parseWith([alertAt("poly", { event: "Tornado Warning" }, polygon)], { boundaries: geometry });
+  assert.equal(mapped.geography, "county");
+  assert.ok(mapped.countyFips.includes("37183"));
+  assert.ok(mapped.countyFips.length < 10);
+  const [unmapped] = parseWith([alertAt("poly-no-boundaries", {}, polygon)]);
+  assert.equal(unmapped.geography, "unknown");
+  const inside = { type: "Polygon", coordinates: [[[lon, lat], [lon + d, lat], [lon + d, lat + d], [lon, lat + d], [lon, lat]]] };
+  assert.ok(parseWith([alertAt("inside", {}, inside)], { boundaries: geometry })[0].countyFips.includes("37183"));
+});
+
+test("NWS statewide and unmatched alerts are labeled explicitly", () => {
+  const all = countyCatalog.map((county) => `0${county.fips}`);
+  const [bySame, byArea, unknown] = parseWith([
+    alertAt("all", { geocode: { SAME: all } }),
+    alertAt("area", { areaDesc: "North Carolina" }),
+    alertAt("unknown", {}),
+  ]);
+  assert.equal(bySame.geography, "statewide");
+  assert.equal(byArea.geography, "statewide");
+  assert.deepEqual([unknown.geography, unknown.countyFips], ["unknown", []]);
+});
+
+test("NWS parsing drops cancelled (status or messageType), expired, and ended alerts", () => {
+  const same = { geocode: { SAME: ["037183"] } };
+  const alerts = parseWith([
+    alertAt("ok", same),
+    alertAt("status", { ...same, status: "Cancel" }),
+    alertAt("type", { ...same, messageType: "Cancel" }),
+    alertAt("expired", { ...same, expires: "2026-09-13T10:00:00Z" }),
+    alertAt("ended", { ...same, ends: "2026-09-13T11:00:00Z" }),
+  ]);
+  assert.deepEqual(alerts.map((alert) => alert.id), ["ok"]);
+});
+
+test("snapshot validation accepts legacy alerts without geography and rejects invalid geography", () => {
+  const snapshot = (alert) => {
+    const base = unavailableSnapshot("2026-09-13T12:00:00Z");
+    return { ...base, alerts: [alert] };
+  };
+  const legacy = {
+    id: "a", event: "Flood Watch", severity: "Minor", headline: "h", urgency: "Expected", certainty: "Likely", status: "Actual",
+    sentAt: "2026-09-13T11:00:00Z", expiresAt: "2026-09-13T13:00:00Z", areaDescription: "Wake", senderName: "NWS",
+    countyFips: ["37183"], sourceUrl: "https://api.weather.gov/alerts/a",
+  };
+  const options = { requireComplete: false, nowMs: Date.parse("2026-09-13T12:00:00Z") };
+  assert.doesNotThrow(() => validateSnapshot(snapshot(legacy), countyCatalog, options));
+  assert.doesNotThrow(() => validateSnapshot(snapshot({ ...legacy, countyFips: [] }), countyCatalog, options));
+  assert.doesNotThrow(() => validateSnapshot(snapshot({ ...legacy, geography: "county" }), countyCatalog, options));
+  assert.doesNotThrow(() => validateSnapshot(snapshot({ ...legacy, geography: "statewide", countyFips: [] }), countyCatalog, options));
+  assert.doesNotThrow(() => validateSnapshot(snapshot({ ...legacy, geography: "unknown", countyFips: [] }), countyCatalog, options));
+  assert.throws(() => validateSnapshot(snapshot({ ...legacy, geography: "everywhere" }), countyCatalog, options), /weather-record-schema/);
+  assert.throws(() => validateSnapshot(snapshot({ ...legacy, geography: "unknown" }), countyCatalog, options), /weather-record-schema/);
+  assert.throws(() => validateSnapshot(snapshot({ ...legacy, geography: "county", countyFips: [] }), countyCatalog, options), /weather-record-schema/);
+});
+
+test("snapshot builder maps polygon alerts with county boundaries and malformed geometry is tolerated", async () => {
+  const wake = geometry.features.find((feature) => feature.properties.GEOID === "37183");
+  const [lon, lat] = wake.geometry.type === "Polygon" ? wake.geometry.coordinates[0][0] : wake.geometry.coordinates[0][0][0];
+  const d = 0.01;
+  const polygon = { type: "Polygon", coordinates: [[[lon - d, lat - d], [lon + d, lat - d], [lon + d, lat + d], [lon - d, lat + d], [lon - d, lat - d]]] };
+  const payload = { features: [alertAt("tor", { event: "Tornado Warning" }, polygon), alertAt("bad", {}, { type: "Polygon", coordinates: [5] })] };
+  const fetchImpl = async () => ({ ok: true, async text() { return powerHtml(); }, async json() { return payload; } });
+  const snapshot = await buildSnapshot({ fetchImpl, at: new Date("2026-09-13T12:00:00Z"), countyCatalog, countyGeometry: geometry, retryOptions: noDelay });
+  assert.equal(snapshot.alerts[0].geography, "county");
+  assert.ok(snapshot.alerts[0].countyFips.includes("37183"));
+  assert.equal(snapshot.alerts[1].geography, "unknown");
+});
