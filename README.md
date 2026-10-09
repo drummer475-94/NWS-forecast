@@ -4,7 +4,7 @@ NWS Local Weather is a mobile-first, two-page static app for U.S. forecasts and 
 
 ## Pages
 
-- `index.html` — current conditions, next-24-hour precipitation, hourly and seven-day forecasts, active alerts, and animated radar for a U.S. location.
+- `index.html` — current conditions, next-24-hour precipitation, hourly and seven-day forecasts, all active alerts for the point, and animated radar for a U.S. location.
 - `status.html` — North Carolina county power totals, active county alerts, a real county map, ZIP and device-location lookup, source freshness, and last-known-data handling.
 
 Both pages share the Local Weather header, Forecast / NC Status navigation, responsive styles, and the `theme` browser preference. Location state is intentionally separate. The status page stores only a county FIPS code, and only when “Remember this county” is selected.
@@ -85,6 +85,16 @@ An alert is *statewide* only when it covers all 100 counties or its area descrip
 
 Both pages use the same active-alert rule. An alert is active only when it is an `Actual` message (not Test, Exercise, System or Draft), is not a cancellation, and has not passed its `expires` or `ends` time. Forecast-page alerts come from the NWS point query for the selected location, and each card links to its official NWS details.
 
+The forecast page's "Active alerts" panel lists every active alert for the point, not only watches and warnings, ordered by significance (warnings, then watches, advisories, statements, and anything else) and by soonest expiry within each group. Each card carries a text badge (Warning, Watch, Advisory, Statement or Other) so the type never depends on color. At most six cards are shown; if more are active the panel says "Showing 6 of N" and links to the point's forecast page on weather.gov, which lists every hazard for the coordinates. Only Tornado and Flash Flood Warnings drive the red banner and only warnings open the severe weather panel; advisories, statements and watches never do.
+
+### Location naming
+
+A ZIP lookup labels the location with the ZIP's own place name and state (for example "Wilmington, NC" for 28401), because the nearest NWS named point can be a different town. That label is kept across refreshes of the same location and is dropped as soon as a different ZIP or a device location loads; device locations are labeled with the NWS `relativeLocation`. The location line, the severe weather panel and other text all use the same label.
+
+### Forecast icons
+
+Hourly and daily icons load straight from api.weather.gov with no extra requests. NWS occasionally answers an icon request with a non-image error body, which the browser blocks. When an icon fails, the app retries once with only the first condition if the icon path combines two (`.../rain_showers,20/tsra_hi,20` becomes `.../rain_showers,20`); if that also fails, or the icon had a single condition, the broken image is replaced by an emoji chosen from the period's short forecast. The replacement keeps the image's accessible name (decorative daily icons stay hidden from assistive technology). No inline `onerror` handlers are used.
+
 ## Data sources
 
 - National Weather Service API
@@ -94,6 +104,8 @@ Both pages use the same active-alert rule. An alert is active only when it is an
 - USGS National Map tiles
 - U.S. Census Bureau county boundaries
 - Zippopotam.us ZIP lookup
+
+A "Radar source" switch above the map chooses between **Local NWS radar** (the default) and **National (RainViewer)**. It is a pair of real radio buttons, so arrow keys and Space work. The choice is remembered per viewer in `localStorage` under `radarSource`; if storage is unavailable the app still works and defaults to Local. Choosing National loads RainViewer HD and keeps it: forecast loads, ZIP or location changes, the five-minute refresh and Retry never switch back to NWS, and it is not treated as a fallback (the data-source row reads "Active: RainViewer HD (national, selected)"). The nearby radar dots stay on the map in both modes; clicking or pressing Enter on one switches to Local and selects that station, and "Use auto-detect" also returns to Local. With Local, a failed NWS service or tile load falls back to RainViewer while the switch stays on Local, and a visible note says "NWS radar unavailable — showing RainViewer national radar as a fallback" with Retry radar available. Local without a known station (no location yet, or none for the point) shows a note and uses RainViewer. Switching sources keeps the map centre, clamps zoom to the new source's limit and restarts animation, refresh timer and layers cleanly; if RainViewer is already on screen no reload is made. Choosing a source never changes the manually selected station for the current location.
 
 Radar is always high definition; there is no SD mode or SD fallback. After a forecast location is loaded, the app prefers the assigned NWS station's time-enabled Super Resolution Base Reflectivity layer. Nearby WSR-88D sites from the NWS radar-station API appear as clickable dots on the map so users can manually choose a site that may provide better coverage than auto-detect. If the selected NWS service or its tiles are unavailable, the app falls back to RainViewer's 512 px HD tiles. Radar frame metadata is refreshed about every five minutes while the page is visible and online, without recreating the map or changing the selected station, source or zoom limits. Cached frame layers are reused, frames that age out are removed, and animation state is kept. The radar panel shows the newest scan time from the provider metadata. A failed refresh keeps the existing frames with a notice and does not trigger the fallback.
 
@@ -121,7 +133,7 @@ Power outage counts are shown for North Carolina counties only, read from the sa
 
 ### Data source health
 
-A collapsed "Data sources" panel at the bottom of the forecast page (and a small "Data sources: all current / 1 stale / 2 issues" pill under the hero's updated label, which opens and focuses the panel) shows the state of each upstream provider: NWS forecast, station observation, gridpoint precipitation, alerts and forecast discussion, radar, the ZIP lookup (listed only after it has been used) and the USGS basemap (listed once its tiles have loaded or failed). Each row gives a status, the clock time of the last successful update in the location's time zone, how old the data is, and a short explanation. The radar row names the active provider and, when NWS super-resolution failed, says that the RainViewer HD fallback is active.
+A collapsed "Data sources" panel at the bottom of the forecast page (and a small "Data sources: all current / 1 stale / 2 issues" pill under the hero's updated label, which opens and focuses the panel) shows the state of each upstream provider: NWS forecast, station observation, gridpoint precipitation, alerts and forecast discussion, radar, the ZIP lookup (listed only after it has been used) and the USGS basemap (listed once its tiles have loaded or failed). Each row gives a status, the clock time of the last successful update in the location's time zone, how old the data is, and a short explanation. The radar row names the active provider and, when NWS super-resolution failed, says that the RainViewer HD fallback is active; National chosen with the radar source switch is reported as selected, not as a fallback.
 
 Health is derived only from requests the app already makes. There is no extra polling and no separate probe request, and ages refresh once a minute only while the page is visible. A source that already has good data keeps showing it while it re-checks, and a failed refresh keeps the last good data's age ("Last good data: 20 min old"). Records for location-dependent sources go back to "Checking" when the location changes, and responses from superseded loads never update them.
 

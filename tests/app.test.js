@@ -118,12 +118,27 @@ function loadAppForTesting() {
       isValidCoordinates,
       mergeDailyPeriods,
       normalizeRadarStation,
+      parseRadarSourcePreference,
+      resolveRadarSource,
+      getStoredRadarSource,
+      storeRadarSource,
+      setRadarSourcePreference,
+      getRadarSourceNote,
+      describeRadarProvider,
       normalizeTimeZone,
       parseIsoDuration,
       parseRadarCatalog,
       parseValidTime,
       parseWindMph,
       renderAlerts,
+      alertCategory,
+      sortPointAlerts,
+      pointAlertsUrl,
+      fallbackIconUrl,
+      iconFallbackText,
+      handleForecastIconError,
+      resolveLocationLabel,
+      formatZipPlaceLabel,
       loadForecast,
       getThreatWarnings,
       refreshLocationAlerts,
@@ -339,7 +354,7 @@ test('an alert-provider failure is not reported as zero active alerts', () => {
 
   api.renderAlerts([]);
   assert.equal(elements.get('#alertsCount').textContent, 'None');
-  assert.match(elements.get('#alertsList').innerHTML, /No active watches or warnings/i);
+  assert.match(elements.get('#alertsList').innerHTML, /No active alerts for this location/i);
 });
 
 test('feels-like calculations use mean sustained wind and weather thresholds', () => {
@@ -440,6 +455,100 @@ test('alert list uses the same active rule as the banner and links official deta
     warning({ event: 'Flood Warning', status: 'Exercise' }), warning({ event: 'Wind Warning', messageType: 'Cancel' }),
     warning({ event: 'Heat Warning', ends: new Date(Date.now() - 1).toISOString() })]);
   assert.equal(elements.get('#alertsCount').textContent, '1 active');
+});
+
+test('point alerts list every active alert, ordered by significance then expiry', () => {
+  const { api, elements } = loadAppForTesting();
+  const at = (minutes) => new Date(Date.now() + minutes * 60000).toISOString();
+  const features = [
+    warning({ event: 'Special Weather Statement', expires: at(10) }),
+    warning({ event: 'Wind Advisory', expires: at(50) }),
+    warning({ event: 'Flood Watch', expires: at(40) }),
+    warning({ event: 'Coastal Flood Statement', expires: at(5) }),
+    warning({ event: 'Flood Warning', expires: at(90) }),
+    warning({ event: 'Dense Fog Advisory', expires: at(20) }),
+    warning({ event: 'Tornado Warning', expires: at(30) }),
+    warning({ event: 'Hazardous Weather Outlook', expires: at(1) }),
+    warning({ event: 'Wind Advisory', status: 'Test' }),
+    warning({ event: 'Wind Advisory', messageType: 'Cancel' }),
+    warning({ event: 'Wind Advisory', expires: at(-1) }),
+    null
+  ];
+  assert.deepEqual(Array.from(api.sortPointAlerts(features, Date.now()), (a) => a.event), [
+    'Tornado Warning', 'Flood Warning', 'Flood Watch', 'Dense Fog Advisory', 'Wind Advisory',
+    'Coastal Flood Statement', 'Special Weather Statement', 'Hazardous Weather Outlook'
+  ]);
+  assert.deepEqual(Array.from(['Red Flag Warning', 'Tornado Watch', 'Heat Advisory', 'Hurricane Local Statement',
+    'Marine Weather Statement', 'Hazardous Weather Outlook', '', undefined], api.alertCategory),
+  ['warning', 'watch', 'advisory', 'statement', 'statement', 'other', 'other', 'other']);
+
+  api.renderAlerts([warning({ event: 'Wind Advisory' }), warning({ event: 'Special Weather Statement' })]);
+  assert.equal(elements.get('#alertsCount').textContent, '2 active');
+  assert.equal(api.pointAlertsUrl(25.7791, -80.1978),
+    'https://forecast.weather.gov/MapClick.php?lat=25.7791&lon=-80.1978');
+});
+
+test('advisories and statements never trigger the warning banner or severe selection', () => {
+  const { api } = loadAppForTesting();
+  const features = [warning({ event: 'Wind Advisory' }), warning({ event: 'Special Weather Statement' }),
+    warning({ event: 'Tornado Watch' })];
+  assert.equal(api.getThreatWarnings(features, Date.now()).length, 0);
+});
+
+test('a ZIP place name labels only the location it was looked up for', () => {
+  const { api } = loadAppForTesting();
+  const zip = { key: '34.2257,-77.9447', label: 'Wilmington, NC' };
+  assert.equal(api.resolveLocationLabel(zip, '34.2257,-77.9447', 'Hightsville, NC'), 'Wilmington, NC');
+  assert.equal(api.resolveLocationLabel(zip, '35.78,-78.64', 'Raleigh, NC'), 'Raleigh, NC');
+  assert.equal(api.resolveLocationLabel(null, '34.2257,-77.9447', 'Hightsville, NC'), 'Hightsville, NC');
+  assert.equal(api.resolveLocationLabel(zip, '', 'x'), 'x');
+  assert.equal(api.formatZipPlaceLabel({ 'place name': 'Wilmington', 'state abbreviation': 'NC' }), 'Wilmington, NC');
+  assert.equal(api.formatZipPlaceLabel({ 'place name': 'Wilmington' }), 'Wilmington');
+  assert.equal(api.formatZipPlaceLabel({}), '');
+  assert.equal(api.formatZipPlaceLabel(undefined), '');
+});
+
+test('forecast icon fallback drops the second condition and never needs inline handlers', () => {
+  const { api } = loadAppForTesting();
+  assert.equal(api.fallbackIconUrl('https://api.weather.gov/icons/land/day/rain_showers,20/tsra_hi,20?size=large'),
+    'https://api.weather.gov/icons/land/day/rain_showers,20?size=large');
+  assert.equal(api.fallbackIconUrl('https://api.weather.gov/icons/land/night/sct/rain?size=large'),
+    'https://api.weather.gov/icons/land/night/sct?size=large');
+  assert.equal(api.fallbackIconUrl('https://api.weather.gov/icons/land/day/rain_showers,20?size=large'), '');
+  assert.equal(api.fallbackIconUrl('https://api.weather.gov/icons/land/day/'), '');
+  assert.equal(api.fallbackIconUrl('https://api.weather.gov/icons/other'), '');
+  assert.equal(api.fallbackIconUrl('http://api.weather.gov/icons/land/day/a/b'), '');
+  assert.equal(api.fallbackIconUrl('not a url'), '');
+  assert.equal(api.fallbackIconUrl(undefined), '');
+
+  assert.equal(api.iconFallbackText('Chance Showers And Thunderstorms'), '\u26C8\uFE0F');
+  assert.equal(api.iconFallbackText('Light Rain'), '\u{1F327}\uFE0F');
+  assert.equal(api.iconFallbackText('Mostly Clear', true), '\u2601\uFE0F');
+  assert.equal(api.iconFallbackText('Clear', true), '\u{1F319}');
+  assert.equal(api.iconFallbackText('Sunny'), '\u2600\uFE0F');
+  assert.equal(api.iconFallbackText(''), '\u{1F321}\uFE0F');
+});
+
+test('a failed forecast icon retries once, then is replaced instead of left broken', () => {
+  const { api } = loadAppForTesting();
+  const replaced = [];
+  const img = {
+    tagName: 'IMG',
+    className: 'hour-icon',
+    dataset: { condition: 'Rain' },
+    attrs: { src: 'https://api.weather.gov/icons/land/day/rain,20/tsra,20?size=large', alt: 'Rain' },
+    getAttribute(name) { return this.attrs[name]; },
+    set src(value) { this.attrs.src = value; },
+    replaceWith(node) { replaced.push(node); }
+  };
+  api.handleForecastIconError({ target: img });
+  assert.equal(img.attrs.src, 'https://api.weather.gov/icons/land/day/rain,20?size=large');
+  assert.equal(replaced.length, 0);
+  api.handleForecastIconError({ target: img });
+  assert.equal(replaced.length, 1);
+  assert.equal(replaced[0].className, 'hour-icon icon-fallback');
+  api.handleForecastIconError({ target: { tagName: 'IMG', dataset: {} } });
+  assert.equal(replaced.length, 1);
 });
 
 test('banner escapes upstream text, retains warnings on failure, and clears on empty results', () => {
@@ -1392,4 +1501,74 @@ test('renderAlerts opens the severe panel and points the banner link at it', () 
   assert.match(elements.get('#warningBanner').innerHTML, /href="#severeHeading"/);
   api.renderAlerts([severeFeature({ event: 'Special Marine Warning' }, 'm')]);
   assert.equal(elements.get('#severePanel').classList.contains('hidden'), false, 'any Warning opens severe mode');
+});
+
+// Radar source toggle (Local NWS vs National RainViewer)
+test('radar source preference parsing defaults to local', () => {
+  const { api } = loadAppForTesting();
+  assert.equal(api.parseRadarSourcePreference('national'), 'national');
+  assert.equal(api.parseRadarSourcePreference('local'), 'local');
+  for (const value of [null, undefined, '', 'NATIONAL', 'rainviewer', 42]) {
+    assert.equal(api.parseRadarSourcePreference(value), 'local');
+  }
+});
+
+test('radar source storage is optional and every access is guarded', () => {
+  const { api, context } = loadAppForTesting();
+  assert.equal(api.getStoredRadarSource(), 'local', 'no localStorage at all');
+  const throwing = { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); } };
+  context.window.localStorage = throwing;
+  assert.equal(api.getStoredRadarSource(), 'local');
+  assert.doesNotThrow(() => api.storeRadarSource('national'));
+  const data = new Map();
+  context.window.localStorage = {
+    getItem: (key) => (data.has(key) ? data.get(key) : null),
+    setItem: (key, value) => { data.set(key, String(value)); }
+  };
+  api.storeRadarSource('national');
+  assert.equal(data.get('radarSource'), 'national');
+  assert.equal(api.getStoredRadarSource(), 'national');
+  data.set('radarSource', 'garbage');
+  assert.equal(api.getStoredRadarSource(), 'local');
+});
+
+test('resolveRadarSource: national always RainViewer, local needs a station', () => {
+  const { api } = loadAppForTesting();
+  assert.equal(api.resolveRadarSource('national', 'KRAX'), 'rainviewer');
+  assert.equal(api.resolveRadarSource('national', ''), 'rainviewer');
+  assert.equal(api.resolveRadarSource('local', 'KRAX'), 'nws');
+  assert.equal(api.resolveRadarSource('local', ' krax '), 'nws');
+  assert.equal(api.resolveRadarSource('local', ''), 'rainviewer');
+  assert.equal(api.resolveRadarSource('local', 'bad!'), 'rainviewer');
+  assert.equal(api.resolveRadarSource('unknown', 'KRAX'), 'nws');
+});
+
+test('radar provider health text: national by choice is not a fallback', () => {
+  const { api } = loadAppForTesting();
+  Object.assign(api.state, { radarSource: 'rainviewer', radarSourcePreference: 'national', radarStation: 'KRAX', radarFallbackUsed: false });
+  assert.equal(api.describeRadarProvider(), 'Active: RainViewer HD (national, selected)');
+  assert.equal(api.getRadarSourceNote(), '');
+  Object.assign(api.state, { radarSourcePreference: 'local', radarFallbackUsed: true });
+  assert.match(api.describeRadarProvider(), /^Fallback active: RainViewer HD/);
+  assert.match(api.getRadarSourceNote(), /^NWS radar unavailable \u2014 showing RainViewer national radar as a fallback/);
+  Object.assign(api.state, { radarSource: 'nws', radarFallbackUsed: false });
+  assert.equal(api.describeRadarProvider(), 'Active: NWS KRAX super-res');
+  assert.equal(api.getRadarSourceNote(), '');
+});
+
+test('switching radar source persists, and skips a reload when RainViewer is already showing', () => {
+  const { api, context } = loadAppForTesting();
+  const data = new Map();
+  context.window.localStorage = { getItem: (k) => data.get(k) ?? null, setItem: (k, v) => data.set(k, v) };
+  let loads = 0;
+  context.loadRadar = () => { loads += 1; };
+  Object.assign(api.state, { radarSource: 'rainviewer', radarStation: 'KRAX', radarFallbackUsed: true, radarFrames: [{ time: 1, path: '/v2/radar/1' }] });
+  api.setRadarSourcePreference('national');
+  assert.equal(api.state.radarSourcePreference, 'national');
+  assert.equal(data.get('radarSource'), 'national');
+  assert.equal(api.state.radarFallbackUsed, false);
+  assert.equal(loads, 0, 'already on RainViewer, so no reload');
+  api.setRadarSourcePreference('local');
+  assert.equal(data.get('radarSource'), 'local');
+  assert.equal(loads, 1, 'local with a station needs NWS data');
 });

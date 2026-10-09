@@ -17,6 +17,9 @@ const RADAR_CHOICE_LIMIT = 6;
 const RADAR_CHOICE_RADIUS_MILES = 250;
 const RADAR_CHOICE_MINIMUM = 4;
 const RADAR_REFRESH_MS = 5 * 60 * 1000;
+// Per-viewer radar source choice: 'local' (NWS station radar, default) or 'national' (RainViewer).
+const RADAR_SOURCE_STORAGE_KEY = 'radarSource';
+const RADAR_FALLBACK_NOTE = 'NWS radar unavailable \u2014 showing RainViewer national radar as a fallback.';
 // NWS observations normally arrive hourly or better; anything older than this is no
 // longer "current" and the hero panel falls back to the hourly forecast.
 const OBSERVATION_MAX_AGE_MS = 90 * 60 * 1000;
@@ -88,6 +91,8 @@ const state = {
   lat: null,
   lon: null,
   city: '',
+  // Label (and the rounded coordinates it belongs to) from the last ZIP lookup.
+  zipLabel: null,
   office: '',
   forecastUrl: '',
   hourlyUrl: '',
@@ -116,6 +121,7 @@ const state = {
   radarLayer: null,
   radarLayers: new Map(),
   radarSource: 'rainviewer',
+  radarSourcePreference: 'local',
   radarStation: '',
   autoRadarStation: '',
   radarSelectionMode: 'auto',
@@ -213,6 +219,9 @@ const el = {
   radarProgress: document.querySelector('#radarProgress'),
   radarPlayButton: document.querySelector('#radarPlayButton'),
   radarRetryButton: document.querySelector('#radarRetryButton'),
+  radarSourceLocal: document.querySelector('#radarSourceLocal'),
+  radarSourceNational: document.querySelector('#radarSourceNational'),
+  radarSourceNote: document.querySelector('#radarSourceNote'),
   radarLegend: document.querySelector('#radarLegend'),
   radarLegendCaption: document.querySelector('#radarLegendCaption'),
   radarLegendTicks: document.querySelector('#radarLegendTicks'),
@@ -236,6 +245,8 @@ el.locationLabel.addEventListener('click', toggleLocationDisclosure);
 el.radarPlayButton.addEventListener('click', toggleRadarAnimation);
 el.radarRetryButton.addEventListener('click', function () { loadRadar(); });
 el.radarAutoButton.addEventListener('click', useAutoRadarStation);
+el.radarSourceLocal.addEventListener('change', handleRadarSourceChange);
+el.radarSourceNational.addEventListener('change', handleRadarSourceChange);
 el.zoomOutButton.addEventListener('click', function () {
   if (state.map) state.map.zoomOut(1);
 });
@@ -248,6 +259,8 @@ el.severeRadarButton.addEventListener('click', showLocalRadar);
 el.discussionDetails.addEventListener('toggle', ensureDiscussionText);
 el.sourceHealthSummary.addEventListener('click', openSourceHealth);
 el.sourceHealth.addEventListener('toggle', updateSourceHealthUi);
+el.hourlyForecast.addEventListener('error', handleForecastIconError, true);
+el.dailyForecast.addEventListener('error', handleForecastIconError, true);
 
 window.addEventListener('offline', function () {
   if (state.radarController) state.radarController.abort();
@@ -328,6 +341,8 @@ function toggleTheme() {
 
 function init() {
   initTheme();
+  state.radarSourcePreference = getStoredRadarSource();
+  syncRadarSourceControl();
   updateSourceHealthUi();
   observeHourlyTrendWidth();
 
@@ -349,6 +364,8 @@ function init() {
   navigator.geolocation.getCurrentPosition(
     function (position) {
       if (!state.manualLocationRequested) {
+        // A device location is named by NWS, never by an earlier ZIP lookup.
+        state.zipLabel = null;
         loadForecast(position.coords.latitude, position.coords.longitude);
       }
     },
@@ -424,7 +441,11 @@ async function handleZipLocation(event) {
     lookupDone = true;
     markSourceSuccess('zip', Date.now(), 'Looked up ZIP ' + zip + '.');
 
-    state.city = place['place name'] + ', ' + place['state abbreviation'];
+    // The ZIP's own place name is what the user typed in; NWS's nearest named
+    // point can be a different town (28401 is Wilmington, not Hightsville).
+    const zipName = formatZipPlaceLabel(place);
+    state.zipLabel = zipName ? { key: getLocationKey(lat, lon), label: zipName } : null;
+    if (zipName) state.city = zipName;
     await loadForecast(lat, lon);
   } catch (error) {
     if (isAbortError(error) || loadId !== state.zipLoadId) return;
@@ -510,8 +531,21 @@ async function loadForecast(lat, lon) {
     state.hourlyUrl = props.forecastHourly;
     state.gridDataUrl = props.forecastGridData || '';
     state.office = props.cwa || '';
+    const previousTimeZone = state.timeZone;
     state.timeZone = normalizeTimeZone(props.timeZone);
-    state.city = formatRelativeLocation(props.relativeLocation);
+    // Radar labels drawn before the location's time zone was known (or for the previous
+    // location) are redrawn; the radar itself is only reloaded when its source changes.
+    if (state.timeZone !== previousTimeZone && state.radarFrames.length) {
+      renderRadarTimestamp();
+      if (!el.radarFreshness.classList.contains('hidden')) {
+        updateRadarFreshness(el.radarFreshness.dataset.state === 'stale');
+      }
+    }
+    state.city = resolveLocationLabel(
+      state.zipLabel,
+      getLocationKey(state.lat, state.lon),
+      formatRelativeLocation(props.relativeLocation)
+    );
     state.countyFips = NwsSevereWeather.countyFipsFromPoint(props);
     state.countyStatus = 'known';
     renderSevereMode();
@@ -525,8 +559,12 @@ async function loadForecast(lat, lon) {
       state.radarSelectionMode = 'auto';
       state.radarStation = state.autoRadarStation;
     }
-    if (state.radarStation !== previousRadarStation || state.radarSource !== 'nws') {
-      loadRadar(state.radarStation ? 'nws' : 'rainviewer');
+    // National radar stays on RainViewer when the station changes; local radar reloads
+    // for a new station and retries NWS after a fallback.
+    const wantedRadarSource = resolveRadarSource(state.radarSourcePreference, state.radarStation);
+    if ((state.radarSourcePreference === 'local' && state.radarStation !== previousRadarStation) ||
+        state.radarSource !== wantedRadarSource || !state.radarFrames.length) {
+      loadRadar();
     }
 
     // Optional requests start now so they overlap with the forecast, but nothing
@@ -1700,8 +1738,10 @@ function renderHourly(periods) {
     card.innerHTML =
       '<div class="hour-time">' + formatHour(period.startTime) + '</div>' +
       '<img class="hour-icon" src="' + iconUrl(period.icon, 'large') + '" alt="' +
-      escapeHtml(period.shortForecast || '') +
-      '" width="54" height="54" loading="lazy" decoding="async">' +
+      escapeHtml(period.shortForecast || '') + '" data-condition="' +
+      escapeHtml(period.shortForecast || '') + '"' +
+      (period.isDaytime === false ? ' data-night="true"' : '') +
+      ' width="54" height="54" loading="lazy" decoding="async">' +
       '<div class="hour-temp">' + tempRounded + '\u00B0</div>' +
       (feelsRounded !== tempRounded
         ? '<div class="hour-feels">Feels ' + feelsRounded + '\u00B0</div>'
@@ -1930,27 +1970,23 @@ function renderAlerts(features) {
     return;
   }
 
-  const alerts = features
-    .map(function (feature) { return feature && feature.properties; })
-    .filter(function (alert) {
-      return /\b(watch|warning)\b/i.test((alert && alert.event) || '') && isActiveAlert(alert, Date.now());
-    })
-    .sort(function (a, b) {
-      return new Date(a.ends || a.expires || 0) - new Date(b.ends || b.expires || 0);
-    });
+  const alerts = sortPointAlerts(features, Date.now());
 
   el.alertsCount.textContent = alerts.length ? alerts.length + ' active' : 'None';
   if (!alerts.length) {
-    el.alertsList.innerHTML = '<div class="empty-state">No active watches or warnings for this location.</div>';
+    el.alertsList.innerHTML = '<div class="empty-state">No active alerts for this location.</div>';
     return;
   }
 
   const fragment = document.createDocumentFragment();
-  for (const alert of alerts.slice(0, 6)) {
+  for (const alert of alerts.slice(0, MAX_ALERT_CARDS)) {
+    const category = alertCategory(alert.event);
     const card = document.createElement('article');
-    card.className = 'alert-card ' + (alert.messageType === 'Alert' ? 'alert-card-hot' : '');
+    card.className = 'alert-card' + (category === 'warning' ? ' alert-card-hot' : '');
     card.innerHTML =
-      '<div><div class="alert-title">' + escapeHtml(alert.event || 'Weather alert') + '</div>' +
+      '<div><div class="alert-title"><span class="alert-badge alert-badge-' + category + '">' +
+      ALERT_CATEGORY_LABELS[category] + '</span> ' +
+      escapeHtml(alert.event || 'Weather alert') + '</div>' +
       '<p class="alert-headline">' +
       escapeHtml(alert.headline || alert.areaDesc || 'NWS active alert') +
       '</p></div><div class="alert-meta"><span>' +
@@ -1960,7 +1996,55 @@ function renderAlerts(features) {
         '" target="_blank" rel="noreferrer">Official NWS details</a>' : '') + '</div>';
     fragment.append(card);
   }
+  if (alerts.length > MAX_ALERT_CARDS) {
+    const more = document.createElement('p');
+    more.className = 'alerts-more';
+    more.innerHTML = 'Showing ' + MAX_ALERT_CARDS + ' of ' + alerts.length + ' \u2014 <a href="' +
+      escapeHtml(pointAlertsUrl(state.lat, state.lon)) +
+      '" target="_blank" rel="noreferrer">see all on weather.gov</a>';
+    fragment.append(more);
+  }
   el.alertsList.append(fragment);
+}
+
+const MAX_ALERT_CARDS = 6;
+const ALERT_CATEGORY_ORDER = ['warning', 'watch', 'advisory', 'statement', 'other'];
+const ALERT_CATEGORY_LABELS = {
+  warning: 'Warning',
+  watch: 'Watch',
+  advisory: 'Advisory',
+  statement: 'Statement',
+  other: 'Other'
+};
+
+// Significance group of an NWS event name ("Wind Advisory", "Coastal Flood Statement").
+function alertCategory(event) {
+  const text = String(event || '');
+  if (/\bwarning\b/i.test(text)) return 'warning';
+  if (/\bwatch\b/i.test(text)) return 'watch';
+  if (/\badvisory\b/i.test(text)) return 'advisory';
+  if (/\bstatement\b/i.test(text)) return 'statement';
+  return 'other';
+}
+
+// Every active alert for the point: warnings first, then watches, advisories,
+// statements and anything else, soonest expiry first within each group.
+function sortPointAlerts(features, now) {
+  return (Array.isArray(features) ? features : [])
+    .map(function (feature) { return feature && feature.properties; })
+    .filter(function (alert) { return isActiveAlert(alert, now); })
+    .sort(function (a, b) {
+      const rank = ALERT_CATEGORY_ORDER.indexOf(alertCategory(a.event)) -
+        ALERT_CATEGORY_ORDER.indexOf(alertCategory(b.event));
+      if (rank) return rank;
+      return Date.parse(a.ends || a.expires) - Date.parse(b.ends || b.expires);
+    });
+}
+
+// weather.gov's point forecast page lists every hazard for the coordinates.
+function pointAlertsUrl(lat, lon) {
+  return 'https://forecast.weather.gov/MapClick.php?lat=' + encodeURIComponent(lat) +
+    '&lon=' + encodeURIComponent(lon);
 }
 
 function renderDaily(periods, hourlyPeriods) {
@@ -1979,7 +2063,9 @@ function renderDaily(periods, hourlyPeriods) {
     const card = document.createElement('article');
     card.className = 'day-card';
     card.innerHTML =
-      '<img src="' + iconUrl(day.icon, 'large') + '" alt="" width="58" height="58" loading="lazy" decoding="async">' +
+      '<img src="' + iconUrl(day.icon, 'large') + '" alt="" data-condition="' +
+      escapeHtml(day.shortForecast || '') + '"' + (day.iconDaytime ? '' : ' data-night="true"') +
+      ' width="58" height="58" loading="lazy" decoding="async">' +
       '<div><div class="day-name">' + escapeHtml(day.name) + '</div>' +
       (heatAlert ? '<div class="heat-banner">Feels like up to ' + Math.round(heatAlert) + '\u00B0</div>' : '') +
       '<p class="day-summary">' + escapeHtml(day.summary) + '</p></div>' +
@@ -2000,12 +2086,16 @@ function mergeDailyPeriods(periods) {
       high: null,
       low: null,
       icon: period.icon,
+      shortForecast: period.shortForecast || '',
+      iconDaytime: period.isDaytime !== false,
       summary: period.detailedForecast || period.shortForecast || ''
     };
 
     if (period.isDaytime) {
       existing.high = period.temperature;
       existing.icon = period.icon || existing.icon;
+      existing.shortForecast = period.shortForecast || existing.shortForecast;
+      existing.iconDaytime = true;
       existing.summary = period.detailedForecast || period.shortForecast || existing.summary;
     } else {
       existing.low = period.temperature;
@@ -2211,35 +2301,45 @@ function selectRadarStation(stationId) {
   const station = state.radarChoices.find(function (choice) { return choice.id === stationId; });
   if (!station) return;
   const changed = state.radarStation !== station.id || state.radarSelectionMode !== 'manual';
+  const switchedFromNational = state.radarSourcePreference === 'national';
+  if (switchedFromNational) setRadarSourcePreference('local', true);
   state.radarSelectionMode = 'manual';
   state.radarStation = station.id;
-  updateRadarChoiceUi();
+  updateRadarChoiceUi(switchedFromNational ? 'Switched to Local NWS radar. ' : '');
   if (changed || state.radarSource !== 'nws') loadRadar('nws');
-  showToast('Using NWS ' + station.id + '. Try nearby radar dots to compare coverage.');
+  showToast((switchedFromNational ? 'Switched to Local NWS radar. ' : '') +
+    'Using NWS ' + station.id + '. Try nearby radar dots to compare coverage.');
 }
 
 function useAutoRadarStation() {
   if (!state.autoRadarStation) return;
   const changed = state.radarStation !== state.autoRadarStation || state.radarSelectionMode !== 'auto';
+  const switchedFromNational = state.radarSourcePreference === 'national';
+  if (switchedFromNational) setRadarSourcePreference('local', true);
   state.radarSelectionMode = 'auto';
   state.radarStation = state.autoRadarStation;
-  updateRadarChoiceUi();
+  updateRadarChoiceUi(switchedFromNational ? 'Switched to Local NWS radar. ' : '');
   if (changed || state.radarSource !== 'nws') loadRadar('nws');
   showToast('Radar auto-detect restored to NWS ' + state.autoRadarStation + '.');
 }
 
-function updateRadarChoiceUi() {
+function updateRadarChoiceUi(prefix) {
   el.radarPicker.classList.remove('hidden');
   el.radarAutoButton.disabled = state.radarSelectionMode === 'auto' || !state.autoRadarStation;
   const selected = state.radarChoices.find(function (station) {
     return station.id === state.radarStation;
   });
   const selectionLabel = state.radarSelectionMode === 'manual' ? 'Manual selection' : 'Auto-detect';
-  el.radarChoiceStatus.textContent = selected
-    ? selectionLabel + ': ' + selected.id + ' — ' + selected.name + ', ' +
-      Math.round(selected.distanceMiles) + ' mi away. ' + state.radarChoices.length + ' nearby sites shown.'
-    : selectionLabel + ': ' + (state.radarStation || 'unavailable') + '. ' +
-      state.radarChoices.length + ' nearby sites shown.';
+  const sitesText = state.radarChoices.length + ' nearby sites shown.';
+  if (state.radarSourcePreference === 'national') {
+    el.radarChoiceStatus.textContent = 'National radar is showing. Select a nearby radar dot to switch to Local NWS radar. ' +
+      sitesText;
+  } else {
+    el.radarChoiceStatus.textContent = (prefix || '') + (selected
+      ? selectionLabel + ': ' + selected.id + ' — ' + selected.name + ', ' +
+        Math.round(selected.distanceMiles) + ' mi away. ' + sitesText
+      : selectionLabel + ': ' + (state.radarStation || 'unavailable') + '. ' + sitesText);
+  }
 
   for (const entry of state.radarStationMarkers.entries()) {
     const stationId = entry[0];
@@ -2247,7 +2347,7 @@ function updateRadarChoiceUi() {
     const style = getRadarStationStyle(stationId);
     marker.setStyle(style);
     marker.setRadius(style.radius);
-    if (stationId === state.radarStation) marker.bringToFront();
+    if (stationId === state.radarStation && state.radarSourcePreference === 'local') marker.bringToFront();
     const station = state.radarChoices.find(function (choice) { return choice.id === stationId; });
     const node = marker.getElement();
     if (node && station) node.setAttribute('aria-label', getRadarStationLabel(station));
@@ -2262,7 +2362,7 @@ function setRadarPickerLoading() {
 }
 
 function getRadarStationStyle(stationId) {
-  if (stationId === state.radarStation) {
+  if (stationId === state.radarStation && state.radarSourcePreference === 'local') {
     return {
       radius: 9,
       color: '#ffffff',
@@ -2294,7 +2394,7 @@ function getRadarStationStyle(stationId) {
 
 function getRadarStationLabel(station) {
   let suffix = '';
-  if (station.id === state.radarStation) suffix = ', selected';
+  if (station.id === state.radarStation && state.radarSourcePreference === 'local') suffix = ', selected';
   else if (station.id === state.autoRadarStation) suffix = ', auto-detect choice';
   return 'NWS ' + station.id + ', ' + station.name + ', ' +
     Math.round(station.distanceMiles) + ' miles away' + suffix;
@@ -2332,7 +2432,7 @@ async function loadRadar(preferredSource) {
 
   const requestedSource = preferredSource === 'rainviewer'
     ? 'rainviewer'
-    : (state.radarStation ? 'nws' : 'rainviewer');
+    : resolveRadarSource(state.radarSourcePreference, state.radarStation);
   // An identical load already in flight (for example a manual refresh racing the
   // forecast's own station check) would only repeat the same provider requests.
   const loadKey = requestedSource + ':' + (requestedSource === 'nws' ? state.radarStation : '');
@@ -2374,8 +2474,9 @@ async function loadRadar(preferredSource) {
     state.radarFrameIndex = radarData.frames.length - 1;
     // A tile-level fallback re-enters here asking for RainViewer on a station that has
     // one; that is still a fallback, so the flag survives until the next NWS attempt.
-    state.radarFallbackUsed = usedFallback ||
-      (preferredSource === 'rainviewer' && state.radarFallbackUsed && Boolean(state.radarStation));
+    // Choosing National is never a fallback.
+    state.radarFallbackUsed = state.radarSourcePreference === 'local' && (usedFallback ||
+      (preferredSource === 'rainviewer' && state.radarFallbackUsed && Boolean(state.radarStation)));
     resetRadarLayers();
     setRadarZoomLimit(radarData.maxZoom);
     setRadarControls(true);
@@ -2386,7 +2487,7 @@ async function loadRadar(preferredSource) {
     state.radarRefreshCheckedAt = Date.now();
     preloadRadarNeighbors();
     if (wasAnimating) startRadarAnimation();
-    if (usedFallback) {
+    if (usedFallback && state.radarFallbackUsed) {
       showToast('NWS super-resolution radar is unavailable, so HD RainViewer is being used.');
     }
   } catch (error) {
@@ -2510,10 +2611,7 @@ function renderRadarFrame(index) {
   bringRadarForward();
   updateRadarProgress();
 
-  const frame = state.radarFrames[state.radarFrameIndex];
-  el.radarTimestamp.textContent = state.radarSource === 'nws'
-    ? 'Radar ' + formatUnix(frame.time) + ' NWS ' + state.radarStation + ' super-res'
-    : 'Radar ' + formatUnix(frame.time) + ' HD';
+  renderRadarTimestamp();
   preloadRadarNeighbors();
   pruneRadarCache();
 }
@@ -2644,6 +2742,14 @@ function resetRadarLayers() {
 
 function radarFrameKey(frame) {
   return state.radarSource + ':' + (frame.iso || frame.path);
+}
+
+function renderRadarTimestamp() {
+  const frame = state.radarFrames[state.radarFrameIndex];
+  if (!frame) return;
+  el.radarTimestamp.textContent = state.radarSource === 'nws'
+    ? 'Radar ' + formatUnix(frame.time) + ' NWS ' + state.radarStation + ' super-res'
+    : 'Radar ' + formatUnix(frame.time) + ' HD';
 }
 
 function getLatestRadarScanTime(frames) {
@@ -2849,6 +2955,88 @@ function setRadarStatus(status, message) {
   el.radarStatus.dataset.state = status;
   el.radarStatus.textContent = message;
   updateRadarLegend(status);
+  updateRadarSourceNote(status);
+}
+
+function getRadarSourceNote() {
+  if (state.radarSourcePreference !== 'local' || state.radarSource !== 'rainviewer') return '';
+  if (state.radarFallbackUsed) return RADAR_FALLBACK_NOTE;
+  if (!hasLocation()) return 'Local NWS radar needs a location \u2014 showing RainViewer national radar until one is loaded.';
+  if (!state.radarStation) return 'No NWS radar station is known for this location \u2014 showing RainViewer national radar.';
+  return '';
+}
+
+// The note and the Retry button only describe a loaded radar; loading and error
+// states have their own status text.
+function updateRadarSourceNote(status) {
+  const note = status === 'ready' && state.radarFrames.length ? getRadarSourceNote() : '';
+  el.radarSourceNote.textContent = note;
+  el.radarSourceNote.classList.toggle('hidden', !note);
+  if (status === 'ready') {
+    el.radarRetryButton.classList.toggle('hidden', !state.radarFallbackUsed || state.radarSourcePreference !== 'local');
+  }
+}
+
+function parseRadarSourcePreference(value) {
+  return value === 'national' ? 'national' : 'local';
+}
+
+// Which provider a preference asks for. Local needs a known station; without one it
+// shows RainViewer (with a note) rather than nothing.
+function resolveRadarSource(preference, station) {
+  if (preference === 'national') return 'rainviewer';
+  return normalizeRadarStation(station) ? 'nws' : 'rainviewer';
+}
+
+function getStoredRadarSource() {
+  try {
+    return parseRadarSourcePreference(window.localStorage.getItem(RADAR_SOURCE_STORAGE_KEY));
+  } catch (error) {
+    return 'local';
+  }
+}
+
+function storeRadarSource(value) {
+  try {
+    window.localStorage.setItem(RADAR_SOURCE_STORAGE_KEY, value);
+  } catch (error) {
+    // Storage may be unavailable; the choice still applies for this visit.
+  }
+}
+
+function syncRadarSourceControl() {
+  const national = state.radarSourcePreference === 'national';
+  el.radarSourceLocal.checked = !national;
+  el.radarSourceNational.checked = national;
+}
+
+function handleRadarSourceChange(event) {
+  const next = parseRadarSourcePreference(event && event.target && event.target.value);
+  setRadarSourcePreference(next, false);
+}
+
+// Switching only swaps the provider: the map view is untouched, and loadRadar aborts
+// any request in flight, stops the animation and refresh timer, and rebuilds layers.
+// When the other choice resolves to the RainViewer data already on screen, nothing is
+// reloaded.
+function setRadarSourcePreference(next, skipLoad) {
+  const preference = parseRadarSourcePreference(next);
+  const changed = preference !== state.radarSourcePreference;
+  state.radarSourcePreference = preference;
+  syncRadarSourceControl();
+  if (!changed) return;
+  storeRadarSource(preference);
+  if (state.radarChoices.length) updateRadarChoiceUi();
+  if (skipLoad) return;
+  const target = resolveRadarSource(preference, state.radarStation);
+  if (target === 'rainviewer' && state.radarSource === 'rainviewer' &&
+      state.radarFrames.length && !state.radarController) {
+    state.radarFallbackUsed = false;
+    updateRadarSourceNote(el.radarStatus.dataset.state);
+    recordRadarHealth();
+    return;
+  }
+  loadRadar();
 }
 
 function updateRadarLegend(status) {
@@ -3148,6 +3336,9 @@ function recordPrecipHealth(gridData, precipMm) {
 }
 
 function describeRadarProvider() {
+  if (state.radarSourcePreference === 'national' && state.radarSource === 'rainviewer') {
+    return 'Active: RainViewer HD (national, selected)';
+  }
   if (state.radarFallbackUsed) {
     return 'Fallback active: RainViewer HD (NWS super-resolution unavailable)';
   }
@@ -3565,6 +3756,22 @@ function formatRelativeLocation(location) {
   return props.city + ', ' + props.state;
 }
 
+function formatZipPlaceLabel(place) {
+  const name = place && typeof place['place name'] === 'string' ? place['place name'].trim() : '';
+  const abbreviation = place && typeof place['state abbreviation'] === 'string'
+    ? place['state abbreviation'].trim()
+    : '';
+  if (!name) return '';
+  return abbreviation ? name + ', ' + abbreviation : name;
+}
+
+// A ZIP lookup's label applies only to the coordinates it resolved to, so a refresh
+// of that location keeps it while any other location falls back to the NWS name.
+function resolveLocationLabel(zipLabel, locationKey, relativeLabel) {
+  if (zipLabel && zipLabel.label && locationKey && zipLabel.key === locationKey) return zipLabel.label;
+  return relativeLabel;
+}
+
 function updateLocationLabels(updated) {
   el.locationLabel.textContent = state.city || state.lat + ', ' + state.lon;
   if (updated) el.updatedLabel.textContent = 'Updated ' + formatDateTime(updated);
@@ -3658,6 +3865,65 @@ function iconUrl(value, size) {
   } catch {
     return '';
   }
+}
+
+// NWS combines two conditions into one icon path (".../rain_showers,20/tsra_hi,20");
+// that composite is the form that intermittently comes back as a non-image error body.
+// Returns the same URL with only the first condition, or '' when there is nothing to drop.
+function fallbackIconUrl(value) {
+  try {
+    const url = new URL(value);
+    const parts = url.pathname.split('/');
+    const dayIndex = parts.findIndex(function (part) { return part === 'day' || part === 'night'; });
+    if (dayIndex < 0) return '';
+    const conditions = parts.slice(dayIndex + 1).filter(Boolean);
+    if (conditions.length < 2) return '';
+    url.pathname = parts.slice(0, dayIndex + 2).join('/');
+    return safeUrl(url.href);
+  } catch {
+    return '';
+  }
+}
+
+// Emoji stand-in for an icon that could not load, chosen from the forecast text.
+function iconFallbackText(condition, isNight) {
+  const text = String(condition || '').toLowerCase();
+  if (/thunder|t-storm|tstorm/.test(text)) return '\u26C8\uFE0F';
+  if (/snow|flurr|blizzard|sleet|freezing|wintry|ice/.test(text)) return '\u2744\uFE0F';
+  if (/rain|shower|drizzle/.test(text)) return '\u{1F327}\uFE0F';
+  if (/fog|haze|smoke|mist/.test(text)) return '\u{1F32B}\uFE0F';
+  if (/wind|breezy|blustery/.test(text)) return '\u{1F4A8}';
+  if (/partly|mostly sunny|mostly clear|few clouds|scattered clouds/.test(text)) {
+    return isNight ? '\u2601\uFE0F' : '\u26C5';
+  }
+  if (/cloud|overcast/.test(text)) return '\u2601\uFE0F';
+  if (/sunny|clear|fair/.test(text)) return isNight ? '\u{1F319}' : '\u2600\uFE0F';
+  return '\u{1F321}\uFE0F';
+}
+
+// Error events do not bubble, so this is attached in the capture phase on the lists.
+function handleForecastIconError(event) {
+  const img = event.target;
+  if (!img || img.tagName !== 'IMG' || !img.dataset || img.dataset.condition === undefined) return;
+  if (!img.dataset.iconRetried) {
+    img.dataset.iconRetried = 'true';
+    const retry = fallbackIconUrl(img.getAttribute('src'));
+    if (retry) {
+      img.src = retry;
+      return;
+    }
+  }
+  const fallback = document.createElement('span');
+  fallback.className = (img.className ? img.className + ' ' : '') + 'icon-fallback';
+  fallback.textContent = iconFallbackText(img.dataset.condition, img.dataset.night === 'true');
+  const label = img.getAttribute('alt');
+  if (label) {
+    fallback.setAttribute('role', 'img');
+    fallback.setAttribute('aria-label', label);
+  } else {
+    fallback.setAttribute('aria-hidden', 'true');
+  }
+  img.replaceWith(fallback);
 }
 
 function escapeHtml(value) {

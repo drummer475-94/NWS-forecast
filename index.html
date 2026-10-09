@@ -13,7 +13,7 @@
     <link rel="preconnect" href="https://tilecache.rainviewer.com">
     <link rel="preconnect" href="https://opengeo.ncep.noaa.gov">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-    <link rel="stylesheet" href="styles.css?v=20261009-5">
+    <link rel="stylesheet" href="styles.css?v=20261009-6">
     <script>
       (function () {
         try {
@@ -134,7 +134,7 @@
         <section class="alerts-panel hidden" id="alertsPanel" aria-labelledby="alertsHeading" aria-live="polite">
           <div class="section-heading">
             <div class="section-title-group">
-              <h2 id="alertsHeading" tabindex="-1">Active watches &amp; warnings</h2>
+              <h2 id="alertsHeading" tabindex="-1">Active alerts</h2>
             </div>
             <span class="section-meta" id="alertsCount">--</span>
           </div>
@@ -188,6 +188,18 @@
             </div>
             <span class="section-meta" id="radarTimestamp" role="status" aria-live="polite">Loading radar</span>
           </div>
+
+          <fieldset class="radar-source" id="radarSourceControl" aria-describedby="radarSourceHelp">
+            <legend class="radar-source-legend">Radar source</legend>
+            <div class="radar-source-switch">
+              <input type="radio" name="radarSource" id="radarSourceLocal" value="local" checked>
+              <label for="radarSourceLocal">Local NWS radar</label>
+              <input type="radio" name="radarSource" id="radarSourceNational" value="national">
+              <label for="radarSourceNational">National (RainViewer)</label>
+            </div>
+            <p class="radar-source-help" id="radarSourceHelp">Local: NWS super-resolution from the nearest or selected station (more detail, up to about 250 mi from the site). National: RainViewer composite (wider coverage, lower maximum zoom).</p>
+            <p class="radar-source-note hidden" id="radarSourceNote" role="status" aria-live="polite"></p>
+          </fieldset>
 
           <div class="radar-bar" role="group" aria-label="Radar status and controls">
             <span class="radar-source-pill" id="radarStatus" data-state="loading">Connecting to RainViewer</span>
@@ -251,7 +263,7 @@
     <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-    <script src="severe-weather.js?v=20261009-5"></script>
-    <script src="app.js?v=20261009-5"></script>
+    <script src="severe-weather.js?v=20261009-6"></script>
+    <script src="app.js?v=20261009-6"></script>
   </body>
 </html>

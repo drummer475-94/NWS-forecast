@@ -1228,6 +1228,36 @@ a:hover {
   font-weight: 820;
 }
 
+.alert-badge {
+  display: inline-block;
+  margin-right: 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 0.68rem;
+  font-weight: 830;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
+  text-transform: uppercase;
+  vertical-align: 2px;
+}
+
+.alert-badge-warning {
+  border-color: var(--danger);
+  border-width: 2px;
+}
+
+.alerts-more {
+  color: var(--alert-meta);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.alerts-more a {
+  color: inherit;
+  text-underline-offset: 2px;
+}
+
 .alert-headline {
   max-width: 70ch;
   margin-top: 5px;
@@ -1421,7 +1451,15 @@ a:hover {
   padding: 16px;
 }
 
-.day-card img {
+.icon-fallback {
+  display: grid;
+  place-items: center;
+  font-size: 1.9rem;
+  line-height: 1;
+}
+
+.day-card img,
+.day-card .icon-fallback {
   width: 58px;
   height: 58px;
   border: 1px solid var(--icon-tile-border);
@@ -1485,6 +1523,108 @@ a:hover {
 .radar-bar-controls {
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.radar-source {
+  min-width: 0;
+  margin: 0 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-medium);
+  padding: 10px;
+  background: var(--radar-bar-bg);
+}
+
+.radar-source-legend {
+  padding: 0 4px;
+  color: var(--ink-strong);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.radar-source-switch {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-small);
+  padding: 3px;
+  background: var(--surface-outline-bg);
+}
+
+/* The radios stay focusable and keyboard-operable; the labels are the visible segments. */
+/* Each invisible radio shares a grid cell with its label, on top of it, so clicks land on the radio. */
+.radar-source-switch input {
+  z-index: 1;
+  width: 100%;
+  min-height: 0;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.radar-source-switch input:nth-of-type(1),
+.radar-source-switch label:nth-of-type(1) {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.radar-source-switch input:nth-of-type(2),
+.radar-source-switch label:nth-of-type(2) {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.radar-source-switch label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  border-radius: calc(var(--radius-small) - 2px);
+  padding: 6px 10px;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 0.88rem;
+  font-weight: 760;
+  line-height: 1.2;
+  text-align: center;
+  transition: background 150ms ease, color 150ms ease;
+}
+
+.radar-source-switch label:hover {
+  background: var(--surface-outline-hover-bg);
+}
+
+.radar-source-switch input:checked + label {
+  background: linear-gradient(180deg, var(--action-grad-start), var(--action-grad-end));
+  color: var(--action-ink);
+}
+
+.radar-source-switch input:focus-visible + label {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.radar-source-help,
+.radar-source-note {
+  margin: 8px 2px 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.radar-source-note {
+  border-left: 3px solid var(--warning);
+  padding-left: 8px;
+  color: var(--ink);
+  font-weight: 700;
+}
+
+@media (forced-colors: active) {
+  .radar-source-switch input:checked + label {
+    outline: 2px solid Highlight;
+  }
 }
 
 .radar-source-pill {
@@ -1999,7 +2139,8 @@ a:hover {
     padding: 14px;
   }
 
-  .day-card img {
+  .day-card img,
+  .day-card .icon-fallback {
     width: 50px;
     height: 50px;
   }

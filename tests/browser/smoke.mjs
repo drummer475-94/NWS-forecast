@@ -55,6 +55,11 @@ const ALLOWED_CONSOLE_ERRORS = [
     reason: 'NWS radar service stub returns 503 so the app falls back to RainViewer'
   },
   {
+    urlIncludes: 'https://api.weather.gov/icons/',
+    text: /status of 500/,
+    reason: 'icon-fallback scenario returns a 500 JSON body for selected forecast icons'
+  },
+  {
     urlIncludes: 'https://api.zippopotam.us/us/00000',
     text: /status of 404/,
     reason: 'invalid-ZIP stub returns 404'
@@ -232,7 +237,11 @@ async function installStubs(context, baseOrigin, stubState) {
           return json(route, point, 200, 'application/geo+json');
         }
         if (p === '/gridpoints/RAH/73,57/forecast') return json(route, await fixtureJson('nws-daily.json', now), 200, 'application/geo+json');
-        if (p === '/gridpoints/RAH/73,57/forecast/hourly') return json(route, await fixtureJson('nws-hourly.json', now), 200, 'application/geo+json');
+        if (p === '/gridpoints/RAH/73,57/forecast/hourly') {
+          const hourly = await fixtureJson('nws-hourly.json', now);
+          (stubState.hourlyIcons || []).forEach((icon, index) => { hourly.properties.periods[index].icon = icon; });
+          return json(route, hourly, 200, 'application/geo+json');
+        }
         if (p === '/gridpoints/RAH/73,57') return json(route, await fixtureJson('nws-gridpoint.json', now), 200, 'application/geo+json');
         if (p === '/gridpoints/RAH/73,57/stations') return json(route, await fixtureJson('nws-stations.json', now), 200, 'application/geo+json');
         if (p === '/stations/KRDU/observations/latest') return json(route, await fixtureJson('nws-observation-krdu.json', now), 200, 'application/geo+json');
@@ -249,7 +258,14 @@ async function installStubs(context, baseOrigin, stubState) {
           return json(route, await fixtureJson('nws-afd-product.json', now), 200, 'application/geo+json');
         }
         if (p === '/radar/stations') return json(route, await fixtureJson('nws-radar-stations.json', now), 200, 'application/geo+json');
-        if (p.startsWith('/icons/')) return png(route);
+        if (p.startsWith('/icons/')) {
+          // Intentional failure: NWS sometimes answers an icon request with a non-image error body.
+          if ((stubState.failingIcons || []).some((part) => decodeURIComponent(p).includes(part))) {
+            hit('icon (500 stub)');
+            return json(route, { title: 'Internal Server Error', status: 500 }, 500);
+          }
+          return png(route);
+        }
         break;
       }
       case 'opengeo.ncep.noaa.gov':
@@ -521,6 +537,7 @@ async function runForecastScenario(browser, baseOrigin, viewport, perfOut) {
     expectEqual(await page.locator('#hourlyForecast .hour-card').count(), 24, 'hour cards');
     const days = await page.locator('#dailyForecast .day-card').count();
     expectEqual(days, 7, 'day cards');
+    // The points fixture names the nearest point "Garner"; the ZIP's own place name must win.
     expectEqual((await page.locator('#locationLabel').textContent()).trim(), 'Raleigh, NC', 'location label');
     expectMatch((await page.locator('#dailyOffice').textContent()).trim(), /RAH/, 'forecast office');
     return `${days} days, 24 hourly cards`;
@@ -958,6 +975,175 @@ async function runDiscussionFailureScenario(browser, baseOrigin, viewport) {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// Scenario: forecast icons that come back as a non-image error
+
+async function runIconFallbackScenario(browser, baseOrigin, viewport) {
+  const label = `${viewport.width}x${viewport.height}`;
+  const handle = await newScenarioPage(browser, baseOrigin, viewport);
+  const { page, stubState } = handle;
+  // The first hour uses a combined icon whose composite path fails; the first condition alone loads.
+  stubState.hourlyIcons = [
+    'https://api.weather.gov/icons/land/day/rain_showers,20/tsra_hi,20?size=small',
+    'https://api.weather.gov/icons/land/day/tsra,60?size=small'
+  ];
+  stubState.failingIcons = ['/rain_showers,20/tsra_hi,20', '/day/tsra,60'];
+  const step = makeRunner(label, 'icon-fallback');
+
+  await step('a failing combined icon retries with its first condition; a failing single icon becomes text', async () => {
+    await loadZipForecast(page, baseOrigin);
+    // Lazy-loaded icons only request once the list is near the viewport.
+    await page.locator('#hourlyForecast').scrollIntoViewIfNeeded();
+    await page.waitForFunction(() => document.querySelectorAll('#hourlyForecast .hour-card').length === 24);
+    await page.waitForFunction(() => document.querySelectorAll('#hourlyForecast .icon-fallback').length > 0);
+    const first = page.locator('#hourlyForecast .hour-card').first().locator('img.hour-icon');
+    await page.waitForFunction(() => {
+      const img = document.querySelector('#hourlyForecast .hour-card img.hour-icon');
+      return img && img.complete && img.naturalWidth > 0;
+    });
+    expectMatch(await first.getAttribute('src'), /\/icons\/land\/day\/rain_showers,20\?size=large$/, 'retried with the first condition only');
+    const fallbacks = page.locator('#hourlyForecast .icon-fallback');
+    expect(await fallbacks.count() > 0, 'single-condition failure shows a fallback');
+    const firstFallback = fallbacks.first();
+    expect((await firstFallback.textContent()).trim().length > 0, 'fallback has text');
+    expectEqual(await firstFallback.getAttribute('role'), 'img', 'fallback role');
+    expect(Boolean(await firstFallback.getAttribute('aria-label')), 'fallback keeps the alt text as its label');
+    expect(await firstFallback.isVisible(), 'fallback visible');
+    const broken = await page.evaluate(() => Array.from(document.querySelectorAll('#hourlyForecast img, #dailyForecast img'))
+      .filter((img) => img.getClientRects().length && img.complete && img.naturalWidth === 0).length);
+    expectEqual(broken, 0, 'visible broken images');
+    expect((stubState.hits.get('icon (500 stub)') || 0) >= 2, 'failure stub was exercised');
+    return expectNoHorizontalScroll(page, 'icon fallback');
+  });
+
+  await finishScenarioPage(label, 'icon-fallback', handle);
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Scenario: radar source toggle (Local NWS vs National RainViewer)
+
+async function runRadarSourceScenario(browser, baseOrigin, viewport) {
+  const label = `${viewport.width}x${viewport.height}`;
+  const handle = await newScenarioPage(browser, baseOrigin, viewport);
+  const { page, stubState } = handle;
+  const step = makeRunner(label, 'radar-source');
+  const NWS_KEY = 'NWS radar service (503)';
+  const FALLBACK_NOTE = /^NWS radar unavailable — showing RainViewer national radar as a fallback/;
+  const mapView = () => page.evaluate(() => ({ center: state.map.getCenter(), zoom: state.map.getZoom(), max: state.map.getMaxZoom() }));
+  const healthDetail = async () => {
+    if (!(await page.locator('#sourceHealth').evaluate((node) => node.open))) await page.locator('#sourceHealthSummary').click();
+    await page.waitForFunction(() => document.querySelector('#sourceHealth').open);
+    return (await page.locator('#sourceHealthList li[data-source="radar"] .health-detail').textContent()).trim();
+  };
+
+  await step('toggle is labelled, Local is checked by default and the fallback note is visible', async () => {
+    await loadZipForecast(page, baseOrigin);
+    await waitForHits(stubState, NWS_KEY, 1);
+    await waitForRadarReady(page, 'RainViewer HD ready');
+    expectEqual((await page.locator('#radarSourceControl legend').textContent()).trim(), 'Radar source', 'legend');
+    expect(await page.locator('#radarSourceLocal').isChecked(), 'Local should be checked by default');
+    expect(!(await page.locator('#radarSourceNational').isChecked()), 'National should start unchecked');
+    expectEqual((await page.locator('label[for="radarSourceLocal"]').textContent()).trim(), 'Local NWS radar', 'local label');
+    expectEqual((await page.locator('label[for="radarSourceNational"]').textContent()).trim(), 'National (RainViewer)', 'national label');
+    expectMatch(await page.locator('#radarSourceHelp').textContent(), /250 mi.*lower maximum zoom/, 'helper text');
+    for (const id of ['radarSourceLocal', 'radarSourceNational']) {
+      const box = await page.locator(`label[for="${id}"]`).boundingBox();
+      expect(box && box.height >= 44 && box.width >= 44, `${id} tap target ${JSON.stringify(box)}`);
+    }
+    await page.locator('#radarSourceNote').waitFor({ state: 'visible' });
+    expectMatch((await page.locator('#radarSourceNote').textContent()).trim(), FALLBACK_NOTE, 'fallback note');
+    expect(await page.locator('#radarRetryButton').isVisible(), 'Retry radar should be offered during the fallback');
+    expectMatch(await healthDetail(), /^Fallback active: RainViewer HD/, 'health row during fallback');
+    return expectNoHorizontalScroll(page, 'radar source toggle (local, fallback)');
+  });
+
+  await step('arrow key switches to National: RainViewer, no fallback note, health says selected, zoom capped', async () => {
+    const before = await mapView();
+    const hitsBefore = stubState.hits.get(NWS_KEY) || 0;
+    await page.locator('#radarSourceLocal').focus();
+    await page.keyboard.press('ArrowRight');
+    expect(await page.locator('#radarSourceNational').isChecked(), 'National should be checked');
+    expectEqual(await page.evaluate(() => document.activeElement.id), 'radarSourceNational', 'focus follows the radio');
+    await waitForRadarReady(page, 'RainViewer HD ready');
+    await page.locator('#radarSourceNote').waitFor({ state: 'hidden' });
+    expect(await page.locator('#radarRetryButton').isHidden(), 'Retry should be hidden when National is chosen');
+    expectEqual(await page.locator('#radarLegend').getAttribute('data-source'), 'rainviewer', 'legend source');
+    expectMatch((await page.locator('#zoomLevel').textContent()).trim(), /\/ 8$/, 'RainViewer zoom limit');
+    expectEqual(await healthDetail(), 'Active: RainViewer HD (national, selected)', 'health row');
+    await page.waitForTimeout(500);
+    expectEqual(stubState.hits.get(NWS_KEY) || 0, hitsBefore, 'National must not request NWS radar');
+    const after = await mapView();
+    expect(Math.abs(after.center.lat - before.center.lat) < 1e-6 && Math.abs(after.center.lng - before.center.lng) < 1e-6,
+      `map center moved ${JSON.stringify(before.center)} -> ${JSON.stringify(after.center)}`);
+    expectEqual(after.max, 8, 'map max zoom');
+    expectEqual(await page.evaluate(() => window.localStorage.getItem('radarSource')), 'national', 'stored preference');
+    return expectNoHorizontalScroll(page, 'radar source toggle (national)');
+  });
+
+  await step('a forecast refresh keeps National and does not retry NWS', async () => {
+    const hitsBefore = stubState.hits.get(NWS_KEY) || 0;
+    await page.locator('#refreshButton').click();
+    await page.waitForTimeout(900);
+    await waitForRadarReady(page, 'RainViewer HD ready');
+    expect(await page.locator('#radarSourceNational').isChecked(), 'National should stay checked');
+    expectEqual(stubState.hits.get(NWS_KEY) || 0, hitsBefore, 'NWS requests after refresh');
+    expect(await page.locator('#radarSourceNote').isHidden(), 'note should stay hidden');
+  });
+
+  await step('clicking a station dot while National switches back to Local and says so', async () => {
+    const dots = page.locator('#radarMap path.radar-site-dot');
+    await page.waitForFunction(() => document.querySelectorAll('#radarMap path.radar-site-dot').length >= 2);
+    expectMatch((await page.locator('#radarChoiceStatus').textContent()).trim(),
+      /^National radar is showing\. Select a nearby radar dot to switch to Local NWS radar\./, 'national choice status');
+    const labels = await dots.evaluateAll((nodes) => nodes.map((node) => node.getAttribute('aria-label')));
+    expect(!labels.some((text) => /selected/.test(text)), `no dot should read as selected while National is active: ${labels.join(' | ')}`);
+    const index = labels.findIndex((text) => !/auto-detect choice/.test(text));
+    expect(index >= 0, 'no dot to click');
+    const hitsBefore = stubState.hits.get(NWS_KEY) || 0;
+    await dots.nth(index).focus();
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelector('#radarSourceLocal').checked);
+    expect(!(await page.locator('#radarSourceNational').isChecked()), 'National should be unchecked');
+    expectMatch((await page.locator('#radarChoiceStatus').textContent()).trim(), /^Switched to Local NWS radar\. Manual selection: /, 'choice status');
+    await waitForHits(stubState, NWS_KEY, hitsBefore + 1);
+    await waitForRadarReady(page, 'RainViewer HD ready');
+    await page.locator('#radarSourceNote').waitFor({ state: 'visible' });
+    expectMatch((await page.locator('#radarSourceNote').textContent()).trim(), FALLBACK_NOTE, 'fallback note');
+    expectEqual(await page.evaluate(() => window.localStorage.getItem('radarSource')), 'local', 'stored preference');
+    return expectNoHorizontalScroll(page, 'radar source toggle (dot switched to local)');
+  });
+
+  await step('National is remembered after a reload and survives a ZIP lookup; Space selects Local again', async () => {
+    await page.locator('#radarSourceNational').check();
+    await waitForRadarReady(page, 'RainViewer HD ready');
+    await page.reload({ waitUntil: 'load' });
+    await waitForInitialForecastPage(page);
+    expect(await page.locator('#radarSourceNational').isChecked(), 'National should be remembered');
+    expect(!(await page.locator('#radarSourceLocal').isChecked()), 'Local should be unchecked after reload');
+    expect(await page.locator('#radarSourceNote').isHidden(), 'no note for a chosen National radar');
+    const hitsBefore = stubState.hits.get(NWS_KEY) || 0;
+    await page.locator('#zipLocation').fill('27601');
+    await page.locator('#zipLocation').press('Enter');
+    await page.waitForFunction(() => document.querySelectorAll('#dailyForecast .day-card').length > 0);
+    await page.waitForFunction(() => document.querySelectorAll('#radarMap path.radar-site-dot').length >= 2);
+    await page.waitForTimeout(500);
+    expectEqual((await page.locator('#radarStatus').textContent()).trim(), 'RainViewer HD ready', 'status stays RainViewer');
+    expectEqual(stubState.hits.get(NWS_KEY) || 0, hitsBefore, 'ZIP lookup in National mode must not request NWS radar');
+    await expectNoHorizontalScroll(page, 'radar source toggle (national after reload)');
+
+    await page.locator('#radarSourceLocal').focus();
+    await page.keyboard.press('Space');
+    expect(await page.locator('#radarSourceLocal').isChecked(), 'Space should select Local');
+    await waitForHits(stubState, NWS_KEY, hitsBefore + 1);
+    await waitForRadarReady(page, 'RainViewer HD ready');
+    await page.locator('#radarSourceNote').waitFor({ state: 'visible' });
+    expectMatch(await healthDetail(), /^Fallback active: RainViewer HD/, 'health row after returning to Local');
+    return expectNoHorizontalScroll(page, 'radar source toggle (back to local)');
+  });
+
+  await finishScenarioPage(label, 'radar-source', handle);
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // Scenario: severe weather mode variants (several warnings, no warnings, non-NC location)
 
 async function loadZipForecast(page, baseOrigin) {
@@ -993,6 +1179,30 @@ async function runSevereVariantsScenario(browser, baseOrigin, viewport) {
     await multi.page.locator('#refreshButton').click();
     await multi.page.waitForTimeout(800);
     expectEqual(await multi.page.locator('#severeAlerts .severe-description').first().evaluate((node) => node.open), false, 'closed description stays closed');
+    expectEqual((await multi.page.locator('#locationLabel').textContent()).trim(), 'Raleigh, NC', 'ZIP label survives a refresh of the same location');
+    expectMatch(await multi.page.locator('#severeLocation').textContent(), /^Active warnings for Raleigh, NC$/, 'severe location line after refresh');
+  });
+  await step('forecast page lists every active alert by significance with badges and a capped overflow link', async () => {
+    const page = multi.page;
+    expectEqual((await page.locator('#alertsHeading').textContent()).trim(), 'Active alerts', 'alerts heading');
+    expectEqual((await page.locator('#alertsCount').textContent()).trim(), '7 active', 'alerts count');
+    const cards = page.locator('#alertsList .alert-card');
+    expectEqual(await cards.count(), 6, 'capped card count');
+    const rows = await cards.evaluateAll((nodes) => nodes.map((node) => [
+      node.querySelector('.alert-badge').textContent.trim(),
+      node.querySelector('.alert-title').textContent.replace(node.querySelector('.alert-badge').textContent, '').trim()
+    ].join(': ')));
+    expectEqual(rows.join(' | '), [
+      'Warning: Flash Flood Warning', 'Warning: Severe Thunderstorm Warning', 'Warning: Tornado Warning',
+      'Watch: Tornado Watch', 'Advisory: Wind Advisory', 'Statement: Special Weather Statement'
+    ].join(' | '), 'alert order and badges');
+    const more = page.locator('#alertsList .alerts-more');
+    expectMatch((await more.textContent()).trim(), /^Showing 6 of 7 \u2014 see all on weather\.gov$/, 'overflow note');
+    expectMatch(await more.getByRole('link', { name: 'see all on weather.gov' }).getAttribute('href'),
+      /^https:\/\/forecast\.weather\.gov\/MapClick\.php\?lat=[\d.-]+&lon=[\d.-]+$/, 'overflow link');
+    expect(!/Wind Advisory|Special Weather Statement/.test(await page.locator('#severePanel').textContent()), 'advisory leaked into severe mode');
+    expect(!/Wind Advisory|Statement/.test(await page.locator('#warningBanner').textContent()), 'advisory leaked into banner');
+    return expectNoHorizontalScroll(page, 'alerts list');
   });
   await finishScenarioPage(label, 'severe-variants multi', multi);
 
@@ -1038,7 +1248,7 @@ try {
   );
   console.log(`Chromium ${browser.version()}`);
   for (const viewport of VIEWPORTS) {
-    for (const scenario of [runForecastScenario, runDiscussionFailureScenario, runSevereVariantsScenario, runStatusScenario]) {
+    for (const scenario of [runForecastScenario, runDiscussionFailureScenario, runRadarSourceScenario, runIconFallbackScenario, runSevereVariantsScenario, runStatusScenario]) {
       try {
         await scenario(browser, baseOrigin, viewport, perf);
       } catch (error) {
