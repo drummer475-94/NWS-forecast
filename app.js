@@ -1,4 +1,5 @@
 const NWS_HEADERS = { Accept: 'application/geo+json' };
+const DISCUSSION_STALE_MS = 24 * 60 * 60 * 1000;
 const MAP_MIN_ZOOM = 2;
 const BASEMAP_MAX_ZOOM = 16;
 const RADAR_API = 'https://api.rainviewer.com/public/weather-maps.json';
@@ -22,6 +23,17 @@ const OBSERVATION_MAX_AGE_MS = 90 * 60 * 1000;
 // NWS qualityControl flags: X = rejected, Q = questionable, B = subjective bad.
 const REJECTED_QUALITY_CODES = ['X', 'Q', 'B'];
 const OBSERVATION_FIELD_COUNT = 5;
+// Source-health staleness thresholds (see "Data source health" in README.md).
+const FORECAST_STALE_MS = 3 * 60 * 60 * 1000;
+const ALERTS_STALE_MS = 5 * 60 * 1000;
+const RADAR_STALE_MS = 30 * 60 * 1000;
+const SOURCE_HEALTH_TICK_MS = 60 * 1000;
+// Severe weather mode: how often the NC outage snapshot may be re-read while the panel is shown.
+const OUTAGE_REFRESH_MS = 5 * 60 * 1000;
+// Matches POWER_FRESH_MS in status.js: power data older than this is no longer "current".
+const OUTAGE_STALE_MS = 45 * 60 * 1000;
+const OUTAGE_SNAPSHOT_URL = 'data/nc-status.json';
+const SEVERE_TICK_MS = 60 * 1000;
 const TRANSPARENT_TILE = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
 
 // Tick text for the radar intensity legend. NWS super-resolution base reflectivity
@@ -47,6 +59,29 @@ const RADAR_LEGEND_CONTENT = {
       'precipitation. RainViewer does not publish numeric dBZ thresholds for this palette, ' +
       'so the scale is relative rather than measured.'
   }
+};
+
+// Upstream sources shown in the "Data sources" panel. maxAgeMs is the age after which
+// otherwise-successful data is flagged stale (0 = never judged by age alone). byLocation
+// sources return to "checking" when the location changes; optional ones are listed only
+// after they have actually been used.
+const SOURCE_DEFS = [
+  { key: 'forecast', name: 'NWS forecast', maxAgeMs: FORECAST_STALE_MS, byLocation: true },
+  { key: 'observations', name: 'NWS station observation', maxAgeMs: OBSERVATION_MAX_AGE_MS, byLocation: true },
+  { key: 'precip', name: 'NWS gridpoint precipitation', maxAgeMs: 0, byLocation: true },
+  { key: 'alerts', name: 'NWS alerts', maxAgeMs: ALERTS_STALE_MS, byLocation: true },
+  { key: 'discussion', name: 'NWS forecast discussion', maxAgeMs: DISCUSSION_STALE_MS, byLocation: true },
+  { key: 'radar', name: 'Radar', maxAgeMs: RADAR_STALE_MS },
+  { key: 'outages', name: 'NC outage snapshot', maxAgeMs: OUTAGE_STALE_MS, optional: true },
+  { key: 'zip', name: 'ZIP lookup (Zippopotam.us)', maxAgeMs: 0, optional: true },
+  { key: 'basemap', name: 'USGS basemap', maxAgeMs: 0, optional: true, noAge: true }
+];
+
+const SOURCE_STATUS_TEXT = {
+  ok: 'Current',
+  stale: 'Stale',
+  pending: 'Checking\u2026',
+  idle: 'Not used'
 };
 
 const state = {
@@ -100,7 +135,25 @@ const state = {
   radarPreloadTimer: 0,
   radarResumeOnVisible: false,
   lastBaseMapErrorAt: 0,
-  hourlyPeriods: []
+  hourlyPeriods: [],
+  discussion: null,
+  discussionRendered: '',
+  sourceHealth: createSourceHealth(),
+  sourceHealthTimer: 0,
+  sourceHealthSignature: '',
+  // Severe weather mode
+  countyFips: '',
+  countyStatus: 'pending',
+  severeTimer: 0,
+  severeKey: '',
+  severeAnnouncedKey: '',
+  severeMinimizedIds: new Set(),
+  severeDetailsOpen: new Map(),
+  severeCardsSignature: '',
+  outageSnapshot: null,
+  outageFailed: false,
+  outageCheckedAt: 0,
+  outageController: null
 };
 
 const el = {
@@ -129,6 +182,31 @@ const el = {
   alertsPanel: document.querySelector('#alertsPanel'),
   alertsCount: document.querySelector('#alertsCount'),
   alertsList: document.querySelector('#alertsList'),
+  severeAnnouncer: document.querySelector('#severeAnnouncer'),
+  severePanel: document.querySelector('#severePanel'),
+  severeHeading: document.querySelector('#severeHeading'),
+  severeLocation: document.querySelector('#severeLocation'),
+  severeToggle: document.querySelector('#severeToggle'),
+  severeSummary: document.querySelector('#severeSummary'),
+  severeBody: document.querySelector('#severeBody'),
+  severeFreshness: document.querySelector('#severeFreshness'),
+  severeNotice: document.querySelector('#severeNotice'),
+  severeAlerts: document.querySelector('#severeAlerts'),
+  severeRadarButton: document.querySelector('#severeRadarButton'),
+  severeOutageText: document.querySelector('#severeOutageText'),
+  severeOutageLink: document.querySelector('#severeOutageLink'),
+  radarHeading: document.querySelector('#radarHeading'),
+  sourceHealth: document.querySelector('#sourceHealth'),
+  sourceHealthList: document.querySelector('#sourceHealthList'),
+  sourceHealthSummary: document.querySelector('#sourceHealthSummary'),
+  sourceHealthToggle: document.querySelector('#sourceHealthToggle'),
+  discussionSection: document.querySelector('#discussionSection'),
+  discussionMeta: document.querySelector('#discussionMeta'),
+  discussionStatus: document.querySelector('#discussionStatus'),
+  discussionNote: document.querySelector('#discussionNote'),
+  discussionDetails: document.querySelector('#discussionDetails'),
+  discussionBody: document.querySelector('#discussionBody'),
+  discussionSource: document.querySelector('#discussionSource'),
   radarTimestamp: document.querySelector('#radarTimestamp'),
   radarStatus: document.querySelector('#radarStatus'),
   radarFreshness: document.querySelector('#radarFreshness'),
@@ -165,10 +243,16 @@ el.zoomInButton.addEventListener('click', function () {
   if (state.map) state.map.zoomIn(1);
 });
 el.centerMapButton.addEventListener('click', centerMap);
+el.severeToggle.addEventListener('click', toggleSevereMinimized);
+el.severeRadarButton.addEventListener('click', showLocalRadar);
+el.discussionDetails.addEventListener('toggle', ensureDiscussionText);
+el.sourceHealthSummary.addEventListener('click', openSourceHealth);
+el.sourceHealth.addEventListener('toggle', updateSourceHealthUi);
 
 window.addEventListener('offline', function () {
   if (state.radarController) state.radarController.abort();
   setRadarError('Offline - radar paused', false);
+  markSourceFailure('radar', null, 'Radar is paused while the device is offline.');
 });
 window.addEventListener('online', function () {
   loadRadar();
@@ -244,6 +328,7 @@ function toggleTheme() {
 
 function init() {
   initTheme();
+  updateSourceHealthUi();
   observeHourlyTrendWidth();
 
   try {
@@ -275,8 +360,14 @@ function init() {
 }
 
 function setLocationDisclosure(expanded) {
+  // Hiding the form while its input has focus would drop focus to the page body and leave
+  // the view pinned where the form was, below any severe weather panel that just appeared.
+  const refocus = !expanded && el.zipLocationForm.contains(document.activeElement);
   el.locationLabel.setAttribute('aria-expanded', String(expanded));
   el.zipLocationForm.classList.toggle('hidden', !expanded);
+  if (refocus) {
+    (el.severePanel.classList.contains('hidden') ? el.locationLabel : el.severeHeading).focus();
+  }
 }
 
 function toggleLocationDisclosure() {
@@ -315,6 +406,8 @@ async function handleZipLocation(event) {
   const controller = new AbortController();
   state.zipController = controller;
   setLoading(true);
+  let lookupDone = false;
+  markSourcePending('zip');
   try {
     const data = await fetchJson('https://api.zippopotam.us/us/' + zip, {
       headers: {},
@@ -326,13 +419,20 @@ async function handleZipLocation(event) {
     const lat = Number.parseFloat(place && place.latitude);
     const lon = Number.parseFloat(place && place.longitude);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-      throw new Error('ZIP lookup returned no usable coordinates.');
+      throw providerError('ZIP lookup returned no usable coordinates.');
     }
+    lookupDone = true;
+    markSourceSuccess('zip', Date.now(), 'Looked up ZIP ' + zip + '.');
 
     state.city = place['place name'] + ', ' + place['state abbreviation'];
     await loadForecast(lat, lon);
   } catch (error) {
     if (isAbortError(error) || loadId !== state.zipLoadId) return;
+    if (!lookupDone) {
+      // A 404 means the service answered normally: the ZIP code itself is unknown.
+      if (error.status === 404) markSourceSuccess('zip', Date.now(), 'ZIP ' + zip + ' was not found; the lookup service responded normally.');
+      else markSourceFailure('zip', error, 'ZIP lookup failed.');
+    }
     if (error.status !== 404) console.error(error);
     showToast(error.status === 404
       ? 'ZIP code ' + zip + ' could not be found.'
@@ -379,6 +479,7 @@ async function loadForecast(lat, lon) {
   if (!isSameLocation) {
     state.warningFeatures = [];
     state.alertsStale = false;
+    resetSevereLocation();
     renderWarningBanner();
     el.alertsList.replaceChildren();
     el.alertsCount.textContent = 'Checking';
@@ -387,7 +488,10 @@ async function loadForecast(lat, lon) {
     el.radarPicker.classList.add('hidden');
     el.currentSource.textContent = 'Loading current conditions for this location.';
     el.currentSource.dataset.source = 'forecast';
+    resetDiscussion();
+    resetLocationSourceHealth();
   }
+  markSourcePending('forecast');
 
   refreshLocationAlerts();
 
@@ -399,7 +503,7 @@ async function loadForecast(lat, lon) {
     assertCurrentForecastLoad(load);
     const props = point && point.properties;
     if (!props || !props.forecast || !props.forecastHourly) {
-      throw new Error('NWS did not return forecast endpoints for this location.');
+      throw providerError('NWS did not return forecast endpoints for this location.');
     }
 
     state.forecastUrl = props.forecast;
@@ -408,6 +512,9 @@ async function loadForecast(lat, lon) {
     state.office = props.cwa || '';
     state.timeZone = normalizeTimeZone(props.timeZone);
     state.city = formatRelativeLocation(props.relativeLocation);
+    state.countyFips = NwsSevereWeather.countyFipsFromPoint(props);
+    state.countyStatus = 'known';
+    renderSevereMode();
     renderSunTimes(state.lat, state.lon);
     const previousRadarStation = state.radarStation;
     state.autoRadarStation = normalizeRadarStation(props.radarStation);
@@ -425,6 +532,8 @@ async function loadForecast(lat, lon) {
     // Optional requests start now so they overlap with the forecast, but nothing
     // below waits for them; they refresh the current-conditions panel on arrival.
     load.optional = loadOptionalCurrentData(load, props);
+    // The forecast discussion is supplementary: it runs on its own and handles its own errors.
+    loadDiscussion(load);
 
     const requests = await Promise.allSettled([
       fetchJson(state.forecastUrl, { signal: signal, retries: 1 }),
@@ -453,23 +562,50 @@ async function loadForecast(lat, lon) {
         ? requests[0].reason
         : (requests[1].status === 'rejected'
             ? requests[1].reason
-            : new Error('NWS returned an incomplete forecast.'));
+            : providerError('NWS returned an incomplete forecast.'));
     }
 
     if (hourlyPeriods.length) {
       load.period = hourlyPeriods[0];
       load.generatedAt = hourly.properties.generatedAt;
     }
-    renderLoadCurrentConditions(load);
-    renderHourly(hourlyPeriods.slice(0, 24));
-    renderDaily(dailyPeriods, hourlyPeriods);
-    updateLocationLabels(daily && daily.properties && daily.properties.updated);
+    // A rendering bug must not take the rest of the page down with it: each step is
+    // guarded, and a failure is recorded as an app error rather than a provider one.
+    const dailyUpdated = daily && daily.properties && daily.properties.updated;
+    const rendered = [
+      function () { renderLoadCurrentConditions(load); },
+      function () { renderHourly(hourlyPeriods.slice(0, 24)); },
+      function () { renderDaily(dailyPeriods, hourlyPeriods); },
+      function () { updateLocationLabels(dailyUpdated); }
+    ].map(function (step) { return guardForecastRender(load, step); })
+      .every(Boolean);
     updateMapPosition(state.lat, state.lon);
     loadNearbyRadarChoices(!isSameLocation);
+    if (rendered) {
+      const dataTime = Date.parse(load.generatedAt || dailyUpdated);
+      markSourceSuccess('forecast', dataTime, 'Daily and hourly forecasts loaded.');
+      const missing = [];
+      if (requests[0].status === 'rejected') missing.push('daily');
+      if (requests[1].status === 'rejected') missing.push('hourly');
+      if (missing.length) {
+        // Partial data is shown, but the source is not "current": say which half is missing.
+        const failed = requests[0].status === 'rejected' ? requests[0].reason : requests[1].reason;
+        markSourceFailure('forecast', failed, 'The ' + missing.join(' and ') +
+          ' forecast could not be loaded; showing the other.');
+      }
+    } else {
+      showToast('Part of the forecast could not be displayed. See Data sources for details.');
+    }
     setLocationDisclosure(false);
   } catch (error) {
     if (isAbortError(error) || !isCurrentForecastLoad(load)) return;
     console.error(error);
+    markSourceFailure('forecast', error, 'The forecast could not be loaded.');
+    if (state.countyStatus === 'pending') {
+      state.countyStatus = 'failed';
+      renderSevereMode();
+    }
+    idleUnstartedLocationSources('Not requested because the forecast lookup failed.');
     showToast(friendlyForecastError(error));
     el.updatedLabel.textContent = 'Forecast unavailable. Try again or choose a nearby ZIP code.';
     setLocationDisclosure(true);
@@ -478,6 +614,540 @@ async function loadForecast(lat, lon) {
       state.requestController = null;
       if (!state.zipController) setLoading(false);
     }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Severe weather mode. Shown whenever the selected point has an active NWS Warning. The pure
+// selection, expiry and outage logic lives in severe-weather.js; NWS text is inserted with
+// textContent only and never reworded.
+
+function formatSevereTime(value, nowMs) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '--';
+  // Clock time alone is unambiguous within a day; otherwise add the weekday.
+  return Math.abs(date.getTime() - nowMs) < 18 * 3600000 ? formatClockTime(date) : formatDateTime(value);
+}
+
+function severeWarningNames(alerts) {
+  return Array.from(new Set(alerts.map(function (alert) { return alert.event; }))).join(' • ');
+}
+
+// Pure. Freshness line and the stale-alerts notice, from the health registry alone.
+function buildSevereFreshness(alertsRecord, radarRecord, radarErrored, nowMs, formatTime) {
+  const alertsState = getSourceFreshness(alertsRecord, nowMs, ALERTS_STALE_MS);
+  const alertsTime = alertsRecord && (Number.isFinite(alertsRecord.dataTime) ? alertsRecord.dataTime : alertsRecord.lastSuccessAt);
+  const alertsClock = alertsTime ? formatTime(alertsTime) : '';
+  const parts = [alertsClock ? 'Alerts checked ' + alertsClock : 'Alerts not yet checked'];
+  const radarState = getSourceFreshness(radarRecord, nowMs, RADAR_STALE_MS);
+  if (radarErrored || radarState === 'failed') parts.push('Radar unavailable');
+  else if (radarRecord && Number.isFinite(radarRecord.dataTime)) parts.push('Latest radar scan ' + formatTime(radarRecord.dataTime));
+  else parts.push('Radar loading');
+  let notice = '';
+  if (alertsState === 'failed') {
+    notice = 'Alert updates are failing — showing the last warnings received at ' + (alertsClock || 'an unknown time') +
+      '. Check weather.gov or local media.';
+  } else if (alertsState === 'stale') {
+    notice = 'Alerts have not been refreshed since ' + (alertsClock || 'an unknown time') +
+      ' — showing the last warnings received. Check weather.gov or local media.';
+  }
+  return { text: parts.join(' · '), notice: notice };
+}
+
+function updateSevereFreshness() {
+  if (el.severePanel.classList.contains('hidden')) return;
+  const now = Date.now();
+  const result = buildSevereFreshness(
+    state.sourceHealth.alerts, state.sourceHealth.radar,
+    el.radarStatus.dataset.state === 'error', now,
+    function (ms) { return formatClockTime(new Date(ms)); }
+  );
+  if (el.severeFreshness.textContent !== result.text) el.severeFreshness.textContent = result.text;
+  if (el.severeNotice.textContent !== result.notice) el.severeNotice.textContent = result.notice;
+  el.severeNotice.classList.toggle('hidden', !result.notice);
+}
+
+function resetSevereLocation() {
+  if (state.outageController) state.outageController.abort();
+  state.outageController = null;
+  state.outageSnapshot = null;
+  state.outageFailed = false;
+  state.outageCheckedAt = 0;
+  state.countyFips = '';
+  state.countyStatus = 'pending';
+  state.severeMinimizedIds = new Set();
+  state.severeDetailsOpen = new Map();
+  state.sourceHealth.outages = createSourceRecord();
+  renderSevereMode();
+}
+
+function makeSevereNode(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function makeSevereFact(label, value) {
+  const group = document.createElement('div');
+  group.append(makeSevereNode('dt', 'severe-label', label), makeSevereNode('dd', 'severe-value', value));
+  return group;
+}
+
+const SEVERE_PARAMETER_LABELS = [
+  ['tornadoDetection', 'Tornado detection'],
+  ['maxHailSize', 'Max hail size (inches)'],
+  ['maxWindGust', 'Max wind gust'],
+  ['thunderstormDamageThreat', 'Thunderstorm damage threat'],
+  ['flashFloodDamageThreat', 'Flash flood damage threat']
+];
+
+function buildSevereCard(alert, index, now) {
+  const card = makeSevereNode('article', 'severe-card');
+  card.dataset.event = alert.event;
+  card.append(makeSevereNode('h3', 'severe-event', alert.event));
+  const badgeTexts = [['Severity', alert.severity], ['Urgency', alert.urgency], ['Certainty', alert.certainty]]
+    .filter(function (pair) { return pair[1]; });
+  if (badgeTexts.length) {
+    const badges = makeSevereNode('p', 'severe-badges');
+    badgeTexts.forEach(function (pair) { badges.append(makeSevereNode('span', 'severe-badge', pair[0] + ': ' + pair[1])); });
+    card.append(badges);
+  }
+  if (alert.headline) card.append(makeSevereNode('p', 'severe-headline', alert.headline));
+
+  const facts = makeSevereNode('dl', 'severe-facts');
+  if (alert.areaDesc) facts.append(makeSevereFact('Area', alert.areaDesc));
+  if (alert.senderName) facts.append(makeSevereFact('Issued by', alert.senderName));
+  const effective = alert.effective || alert.onset || alert.sent;
+  if (effective) facts.append(makeSevereFact('Effective', formatSevereTime(effective, now)));
+  const expiryValue = makeSevereNode('dd', 'severe-value severe-expiry',
+    NwsSevereWeather.formatExpiry(alert.endsAt, now, function (iso) { return formatSevereTime(iso, now); }));
+  expiryValue.dataset.endsAt = alert.endsAt;
+  const expiry = document.createElement('div');
+  expiry.append(makeSevereNode('dt', 'severe-label', 'Expires'), expiryValue);
+  facts.append(expiry);
+  SEVERE_PARAMETER_LABELS.forEach(function (pair) {
+    if (alert[pair[0]]) facts.append(makeSevereFact(pair[1], alert[pair[0]]));
+  });
+  card.append(facts);
+
+  if (alert.instruction) {
+    const instruction = makeSevereNode('div', 'severe-instruction');
+    instruction.append(makeSevereNode('h4', 'severe-subheading', 'What to do'), makeSevereNode('div', 'severe-text', alert.instruction));
+    card.append(instruction);
+  }
+  if (alert.description) {
+    const details = makeSevereNode('details', 'severe-description');
+    const remembered = state.severeDetailsOpen.get(alert.id);
+    details.open = remembered === undefined ? index === 0 : remembered;
+    details.addEventListener('toggle', function () { state.severeDetailsOpen.set(alert.id, Boolean(details.open)); });
+    details.append(makeSevereNode('summary', '', 'Full NWS description'), makeSevereNode('div', 'severe-text', alert.description));
+    card.append(details);
+  }
+  if (alert.officialUrl) {
+    const link = makeSevereNode('a', 'severe-source', 'Official NWS alert');
+    link.href = alert.officialUrl;
+    link.target = '_blank';
+    link.rel = 'noreferrer';
+    card.append(link);
+  }
+  return card;
+}
+
+// The time zone is part of the signature: alerts can render before the points response
+// supplies it, and the card times must then be redrawn in the location's zone.
+function severeCardsSignature(alerts, timeZone) {
+  return (timeZone || '') + '|' + JSON.stringify(alerts);
+}
+
+function updateSevereExpiries(now) {
+  el.severeAlerts.querySelectorAll('.severe-expiry').forEach(function (node) {
+    const text = NwsSevereWeather.formatExpiry(node.dataset.endsAt, now, function (iso) { return formatSevereTime(iso, now); });
+    if (node.textContent !== text) node.textContent = text;
+  });
+}
+
+function hideSeverePanel() {
+  window.clearTimeout(state.severeTimer);
+  state.severeTimer = 0;
+  state.severeKey = '';
+  state.severeAnnouncedKey = '';
+  state.severeCardsSignature = '';
+  if (state.outageController) {
+    state.outageController.abort();
+    state.outageController = null;
+    state.outageCheckedAt = 0;
+  }
+  el.severeAnnouncer.textContent = '';
+  el.severePanel.classList.add('hidden');
+}
+
+// Re-evaluates the panel from state.warningFeatures. Cheap and idempotent: the card DOM is rebuilt
+// only when the warning data changes; expiry text and freshness are updated in place.
+function renderSevereMode() {
+  window.clearTimeout(state.severeTimer);
+  state.severeTimer = 0;
+  const now = Date.now();
+  const alerts = hasLocation() ? NwsSevereWeather.selectSevereAlerts(state.warningFeatures, now) : [];
+  if (!alerts.length) {
+    hideSeverePanel();
+    return;
+  }
+
+  const key = NwsSevereWeather.severeModeKey(alerts);
+  state.severeKey = key;
+  // Minimized only while every current warning was already present when the user minimized; a new
+  // warning expands the panel again, while one expiring does not.
+  const minimized = alerts.every(function (alert) { return state.severeMinimizedIds.has(alert.id); });
+  el.severePanel.classList.remove('hidden');
+  el.severePanel.classList.toggle('is-minimized', minimized);
+  el.severeToggle.setAttribute('aria-expanded', String(!minimized));
+  el.severeToggle.textContent = minimized ? 'Show details' : 'Minimize';
+  el.severeBody.classList.toggle('hidden', minimized);
+  el.severeSummary.classList.toggle('hidden', !minimized);
+  el.severeLocation.textContent = 'Active warnings for ' + (state.city || 'your selected location');
+
+  const soonest = alerts.reduce(function (best, alert) {
+    return Date.parse(alert.endsAt) < Date.parse(best.endsAt) ? alert : best;
+  }, alerts[0]);
+  el.severeSummary.textContent = severeWarningNames(alerts) + ' — ' +
+    NwsSevereWeather.formatExpiry(soonest.endsAt, now, function (iso) { return formatSevereTime(iso, now); });
+
+  const signature = severeCardsSignature(alerts, state.timeZone);
+  if (signature !== state.severeCardsSignature) {
+    state.severeCardsSignature = signature;
+    el.severeAlerts.replaceChildren(...alerts.map(function (alert, index) { return buildSevereCard(alert, index, now); }));
+  } else {
+    updateSevereExpiries(now);
+  }
+
+  // Announce once per change in the warning set, never on routine polling.
+  if (key !== state.severeAnnouncedKey) {
+    state.severeAnnouncedKey = key;
+    el.severeAnnouncer.textContent = 'Severe weather: ' + severeWarningNames(alerts) + ' in effect for your location. ' +
+      'Details are at the top of the page.';
+  }
+
+  updateSevereFreshness();
+  renderSevereOutage(now);
+  maybeRefreshOutages(now);
+
+  if (!document.hidden) {
+    const nextExpiry = Math.min.apply(null, alerts.map(function (alert) { return Date.parse(alert.endsAt); }));
+    const delay = Math.min(SEVERE_TICK_MS, Math.max(1000, nextExpiry - now + 50));
+    state.severeTimer = window.setTimeout(renderSevereMode, delay);
+  }
+}
+
+function toggleSevereMinimized() {
+  const alerts = NwsSevereWeather.selectSevereAlerts(state.warningFeatures, Date.now());
+  const minimized = alerts.length > 0 && alerts.every(function (alert) { return state.severeMinimizedIds.has(alert.id); });
+  state.severeMinimizedIds = minimized ? new Set() : new Set(alerts.map(function (alert) { return alert.id; }));
+  renderSevereMode();
+}
+
+function showLocalRadar() {
+  const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // Navigation only: a radar the user chose by hand is never overridden.
+  el.radarHeading.scrollIntoView({ block: 'start', behavior: reduceMotion ? 'auto' : 'smooth' });
+  el.radarHeading.focus({ preventScroll: true });
+}
+
+function outageTimeFormatter(nowMs) {
+  return function (iso) {
+    const ms = Date.parse(iso);
+    return Math.abs(nowMs - ms) < 12 * 3600000 ? formatClockTime(new Date(ms)) : formatDateTime(iso);
+  };
+}
+
+function renderSevereOutage(now) {
+  let text;
+  let showLink = false;
+  if (state.countyStatus === 'pending') {
+    text = 'Checking power outage availability…';
+  } else if (state.countyStatus === 'failed') {
+    text = 'Power outage availability could not be determined because the location lookup failed.';
+  } else if (!NwsSevereWeather.isNorthCarolinaFips(state.countyFips)) {
+    text = NwsSevereWeather.formatOutageSummary({ supported: false });
+  } else if (state.outageSnapshot) {
+    const outage = NwsSevereWeather.countyOutageFromSnapshot(state.outageSnapshot, state.countyFips, now);
+    text = NwsSevereWeather.formatOutageSummary(outage, outageTimeFormatter(now));
+    if (state.outageFailed) text += ' The latest refresh failed.';
+    showLink = true;
+  } else if (state.outageFailed) {
+    text = 'Outage data for this county is unavailable right now. Try the NC outage page below.';
+    showLink = true;
+  } else {
+    text = 'Checking power outage data…';
+  }
+  if (el.severeOutageText.textContent !== text) el.severeOutageText.textContent = text;
+  el.severeOutageLink.classList.toggle('hidden', !showLink);
+}
+
+// Same-origin snapshot, read only for NC locations while the severe panel is shown, at most every 5 minutes.
+function maybeRefreshOutages(now) {
+  if (document.hidden || state.outageController || state.countyStatus !== 'known') return;
+  if (!NwsSevereWeather.isNorthCarolinaFips(state.countyFips)) return;
+  if (state.outageCheckedAt && now - state.outageCheckedAt < OUTAGE_REFRESH_MS) return;
+  refreshOutages();
+}
+
+async function refreshOutages() {
+  const controller = new AbortController();
+  state.outageController = controller;
+  state.outageCheckedAt = Date.now();
+  const locationKey = getLocationKey(state.lat, state.lon);
+  markSourcePending('outages');
+  try {
+    const snapshot = await fetchJson(OUTAGE_SNAPSHOT_URL + '?v=' + Date.now(), {
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+      signal: controller.signal
+    });
+    if (controller.signal.aborted || locationKey !== getLocationKey(state.lat, state.lon)) return;
+    if (!snapshot || typeof snapshot !== 'object' || !Array.isArray(snapshot.power) || !snapshot.sources) {
+      throw providerError('The NC outage snapshot has an unexpected format.');
+    }
+    state.outageSnapshot = snapshot;
+    state.outageFailed = false;
+    const power = snapshot.sources.power;
+    const asOf = Date.parse(power && power.lastSuccessAt);
+    markSourceSuccess('outages', asOf, 'County outage counts from the NC Emergency Management snapshot published with this site.');
+  } catch (error) {
+    if (isAbortError(error) || controller.signal.aborted) return;
+    state.outageFailed = true;
+    markSourceFailure('outages', error, 'Power outage counts could not be loaded.');
+  } finally {
+    if (state.outageController === controller) {
+      state.outageController = null;
+      renderSevereOutage(Date.now());
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Area Forecast Discussion (AFD). The text is NWS-authored and shown verbatim; nothing is
+// summarized or reworded, and all of it is inserted with textContent.
+
+function discussionSourceUrl(office) {
+  const code = String(office || '').trim().toUpperCase();
+  if (!/^[A-Z]{3}$/.test(code)) return '';
+  return 'https://forecast.weather.gov/product.php?site=NWS&issuedby=' + code +
+    '&product=AFD&format=txt&version=1&glossary=0';
+}
+
+// Validates a /products/types/AFD/locations/{office}/latest response. The list endpoint is not
+// used: it has been observed serving week-old entries whose products return 404.
+function readDiscussionProduct(product) {
+  if (!product || typeof product !== 'object') return null;
+  if (typeof product.id !== 'string' || !/^[A-Za-z0-9-]+$/.test(product.id)) return null;
+  if (!Number.isFinite(Date.parse(product.issuanceTime))) return null;
+  if (typeof product.productText !== 'string' || !product.productText.trim()) return null;
+  return {
+    id: product.id,
+    issuanceTime: product.issuanceTime,
+    issuingOffice: typeof product.issuingOffice === 'string' ? product.issuingOffice : '',
+    text: product.productText
+  };
+}
+
+// Splits a product into its ".HEADER..." sections. Each body ends at "&&", "$$" or the next
+// header and is kept verbatim apart from leading/trailing blank lines.
+function parseDiscussionSections(text) {
+  const sections = [];
+  let current = null;
+  const finish = function () {
+    if (!current) return;
+    const lines = current.lines;
+    while (lines.length && !lines[0].trim()) lines.shift();
+    while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+    sections.push({ title: current.title, body: lines.join('\n') });
+    current = null;
+  };
+  String(text || '').split(/\r?\n/).forEach(function (line) {
+    const header = /^\.([A-Z0-9].*?)\.\.\.\s*$/.exec(line);
+    if (header) {
+      finish();
+      current = { title: header[1].trim(), lines: [] };
+    } else if (/^\s*(&&|\$\$)\s*$/.test(line)) {
+      finish();
+    } else if (current) {
+      current.lines.push(line);
+    }
+  });
+  finish();
+  return sections;
+}
+
+function discussionOfficeName(text) {
+  const match = /^National Weather Service[ \t]+(\S[^\n]{0,60}?)[ \t]*$/m.exec(String(text || ''));
+  return match ? match[1] : '';
+}
+
+function setDiscussionStatus(message, kind) {
+  el.discussionStatus.textContent = message || '';
+  el.discussionStatus.dataset.state = kind || '';
+  el.discussionStatus.classList.toggle('hidden', !message);
+}
+
+function setDiscussionNote(message) {
+  el.discussionNote.textContent = message || '';
+  el.discussionNote.classList.toggle('hidden', !message);
+}
+
+function resetDiscussion() {
+  state.discussion = null;
+  state.discussionRendered = '';
+  el.discussionSection.classList.add('hidden');
+  el.discussionDetails.classList.add('hidden');
+  el.discussionBody.replaceChildren();
+  el.discussionMeta.textContent = '--';
+  setDiscussionStatus('');
+  setDiscussionNote('');
+}
+
+function renderDiscussionMeta() {
+  const discussion = state.discussion;
+  if (!discussion) {
+    el.discussionMeta.textContent = '--';
+    setDiscussionNote('');
+    return;
+  }
+  const issued = new Date(discussion.issuanceTime);
+  const ageMs = Date.now() - issued.getTime();
+  const name = discussionOfficeName(discussion.text);
+  const parts = ['NWS ' + (name ? name + ' (' + discussion.office + ')' : discussion.office)];
+  parts.push('Issued ' + formatInForecastTime(issued, {
+    weekday: 'short',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short'
+  }));
+  if (ageMs >= 0) parts.push(formatObservationAge(ageMs));
+  el.discussionMeta.textContent = parts.join(' \u00b7 ');
+  setDiscussionNote(ageMs > DISCUSSION_STALE_MS ? 'This discussion is more than 24 hours old.' : '');
+}
+
+async function loadDiscussion(load) {
+  const office = String(state.office || '').trim().toUpperCase();
+  if (!/^[A-Z]{3}$/.test(office)) {
+    resetDiscussion();
+    markSourceIdle('discussion', 'NWS did not name a forecast office for this location.');
+    return;
+  }
+  if (state.discussion && state.discussion.office !== office) resetDiscussion();
+  markSourcePending('discussion');
+  el.discussionSection.classList.remove('hidden');
+  el.discussionSource.href = discussionSourceUrl(office);
+  if (!state.discussion) setDiscussionStatus('Checking for the latest discussion\u2026', 'loading');
+
+  try {
+    let product = null;
+    try {
+      product = await fetchJson(
+        'https://api.weather.gov/products/types/AFD/locations/' + office + '/latest',
+        { signal: load.signal, retries: 1 }
+      );
+    } catch (error) {
+      // NWS answers 404 when the office has no recent discussion on file.
+      if (error.status !== 404) throw error;
+    }
+    if (!isCurrentForecastLoad(load)) return;
+    const latest = readDiscussionProduct(product);
+    if (!latest) {
+      state.discussion = null;
+      state.discussionRendered = '';
+      el.discussionDetails.classList.add('hidden');
+      el.discussionBody.replaceChildren();
+      renderDiscussionMeta();
+      setDiscussionStatus('No recent discussion is available from ' + office + '.', 'empty');
+      markSourceIdle('discussion', 'NWS has no recent discussion on file for ' + office + '.');
+      return;
+    }
+    if (!state.discussion || state.discussion.id !== latest.id) {
+      state.discussionRendered = '';
+      el.discussionBody.replaceChildren();
+    }
+    latest.office = office;
+    state.discussion = latest;
+    setDiscussionStatus('');
+    el.discussionDetails.classList.remove('hidden');
+    renderDiscussionMeta();
+    ensureDiscussionText();
+    markSourceSuccess('discussion', Date.parse(latest.issuanceTime), 'Issued by ' + office + '.');
+  } catch (error) {
+    if (isAbortError(error) || !isCurrentForecastLoad(load)) return;
+    console.warn('The forecast discussion is unavailable.', error);
+    markSourceFailure('discussion', error, state.discussion
+      ? 'Could not check for a newer discussion; showing the last one loaded.'
+      : 'The forecast discussion could not be loaded.');
+    if (state.discussion) {
+      setDiscussionNote('Could not check for a newer discussion. Showing the last one loaded.');
+      return;
+    }
+    el.discussionDetails.classList.add('hidden');
+    el.discussionMeta.textContent = '--';
+    setDiscussionStatus('The forecast discussion for ' + office +
+      ' could not be loaded. Refresh to try again, or read it on weather.gov.', 'error');
+  }
+}
+
+// The text arrives with the product; building the section DOM waits until the reader opens it.
+function ensureDiscussionText() {
+  const discussion = state.discussion;
+  if (!discussion || !el.discussionDetails.open || state.discussionRendered === discussion.id) return;
+  renderDiscussionBody(discussion.text);
+  state.discussionRendered = discussion.id;
+}
+
+function renderDiscussionBody(text) {
+  const fragment = document.createDocumentFragment();
+  const sections = parseDiscussionSections(text);
+  const full = document.createElement('pre');
+  full.className = 'discussion-text';
+  full.textContent = text;
+
+  if (!sections.length) {
+    full.setAttribute('aria-label', 'Original forecast discussion text');
+    fragment.append(full);
+  } else {
+    const preferred = sections.findIndex(function (section) {
+      return /^KEY MESSAGES/.test(section.title);
+    });
+    const openIndex = preferred >= 0 ? preferred : 0;
+    sections.forEach(function (section, index) {
+      const details = document.createElement('details');
+      details.className = 'discussion-section';
+      details.open = index === openIndex;
+      const summary = document.createElement('summary');
+      summary.textContent = section.title;
+      const body = document.createElement('pre');
+      body.className = 'discussion-text';
+      body.textContent = section.body;
+      details.append(summary, body);
+      fragment.append(details);
+    });
+    const original = document.createElement('details');
+    original.className = 'discussion-section discussion-original';
+    const originalSummary = document.createElement('summary');
+    originalSummary.textContent = 'Original product text';
+    original.append(originalSummary, full);
+    fragment.append(original);
+  }
+  el.discussionBody.replaceChildren(fragment);
+}
+
+// Runs one rendering step. Anything thrown here comes from our own code, so it is
+// recorded as an app error and the remaining steps still run.
+function guardForecastRender(load, step) {
+  try {
+    step();
+    return true;
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    console.error(error);
+    if (isCurrentForecastLoad(load)) markSourceFailure('forecast', error, 'The forecast could not be displayed.');
+    return false;
   }
 }
 
@@ -492,14 +1162,20 @@ function assertCurrentForecastLoad(load) {
 // Observations and gridpoint precipitation only enrich the hero panel. Each settles
 // on its own, never rejects, and is ignored if a newer location load has started.
 function loadOptionalCurrentData(load, props) {
+  markSourcePending('observations');
+  markSourcePending('precip');
   const observationRequest = loadLatestObservation(props.observationStations, load.signal)
     .then(function (observation) {
       if (!isCurrentForecastLoad(load)) return;
       load.observation = observation;
+      recordObservationHealth(observation);
     })
     .catch(function (error) {
       if (isAbortError(error)) return;
       console.warn('Latest station observation is unavailable.', error);
+      if (isCurrentForecastLoad(load)) {
+        markSourceFailure('observations', error, 'Showing forecast values; the station observation could not be loaded.');
+      }
     })
     .then(function () {
       if (!isCurrentForecastLoad(load)) return;
@@ -513,10 +1189,14 @@ function loadOptionalCurrentData(load, props) {
     .then(function (gridData) {
       if (!isCurrentForecastLoad(load)) return;
       load.precipMm = calculate24HourPrecip(gridData && gridData.properties);
+      recordPrecipHealth(gridData, load.precipMm);
     })
     .catch(function (error) {
       if (isAbortError(error)) return;
       console.warn('Gridpoint precipitation is unavailable.', error);
+      if (isCurrentForecastLoad(load)) {
+        markSourceFailure('precip', error, 'Precipitation totals are unavailable.');
+      }
     })
     .then(function () {
       if (!isCurrentForecastLoad(load)) return;
@@ -1173,14 +1853,21 @@ async function refreshLocationAlerts() {
   const controller = new AbortController();
   state.alertController = controller;
   const locationKey = getLocationKey(state.lat, state.lon);
+  markSourcePending('alerts');
   try {
     const data = await fetchJson('https://api.weather.gov/alerts/active?point=' + state.lat + ',' + state.lon, {
       signal: controller.signal, retries: 1
     });
     if (controller.signal.aborted || locationKey !== getLocationKey(state.lat, state.lon)) return;
-    renderAlerts(data && Array.isArray(data.features) ? data.features : null);
+    const features = data && Array.isArray(data.features) ? data.features : null;
+    renderAlerts(features);
+    if (features) markSourceSuccess('alerts', Date.now(), 'Checked every minute while this page is visible.');
+    else markSourceFailure('alerts', providerError('NWS returned an unusable alerts response.'), 'Active alerts could not be checked.');
   } catch (error) {
-    if (!isAbortError(error) && state.alertController === controller) renderAlerts(null);
+    if (!isAbortError(error) && state.alertController === controller) {
+      renderAlerts(null);
+      markSourceFailure('alerts', error, 'Active alerts could not be checked.');
+    }
   } finally {
     if (state.alertController === controller) {
       state.alertController = null;
@@ -1211,6 +1898,7 @@ function renderWarningBanner() {
   window.clearTimeout(state.warningTimer);
   const now = Date.now();
   const warnings = getThreatWarnings(state.warningFeatures, now);
+  const warningsTarget = NwsSevereWeather.selectSevereAlerts(state.warningFeatures, now).length ? '#severeHeading' : '#alertsHeading';
   const markup = warnings.length ? '<div class="warning-banner-content"><strong>' +
     escapeHtml(Array.from(new Set(warnings.map(function (alert) { return alert.event; }))).join(' • ')) +
     '</strong><span>For your selected location</span>' +
@@ -1219,7 +1907,7 @@ function renderWarningBanner() {
         ' · ' + escapeHtml(formatAlertEnds(alert.ends || alert.expires)) + '</span>';
     }).join('') +
     (state.alertsStale ? '<span>Updates unavailable — showing last received warnings. Refresh to retry.</span>' : '') +
-    '<a href="#alertsHeading">View NWS warnings below</a></div>' : '';
+    '<a href="' + warningsTarget + '">View NWS warnings below</a></div>' : '';
   // Avoid repeating screen reader announcements on unchanged polling results.
   if (el.warningBanner.innerHTML !== markup) el.warningBanner.innerHTML = markup;
   el.warningBanner.classList.toggle('hidden', !warnings.length);
@@ -1233,6 +1921,7 @@ function renderAlerts(features) {
   state.alertsStale = !Array.isArray(features);
   if (!state.alertsStale) state.warningFeatures = features;
   renderWarningBanner();
+  renderSevereMode();
   el.alertsList.replaceChildren();
   el.alertsPanel.classList.remove('hidden');
   if (!Array.isArray(features)) {
@@ -1374,7 +2063,14 @@ function initMap(lat, lon, zoom) {
     }
   ).addTo(state.map);
 
+  state.streetLayer.on('tileload', function () {
+    if (state.sourceHealth.basemap.status !== 'ok') {
+      markSourceSuccess('basemap', NaN, 'Map tiles are loading normally.');
+    }
+  });
   state.streetLayer.on('tileerror', function () {
+    markSourceFailure('basemap', providerError('USGS basemap tiles failed to load.'),
+      'Some map tiles failed to load. Radar controls keep working.');
     const now = Date.now();
     if (now - state.lastBaseMapErrorAt > 15000) {
       state.lastBaseMapErrorAt = now;
@@ -1630,6 +2326,7 @@ async function loadRadar(preferredSource) {
   if (!state.map) return;
   if (!navigator.onLine) {
     setRadarError('Offline - radar unavailable', false);
+    markSourceFailure('radar', null, 'Radar is unavailable while the device is offline.');
     return;
   }
 
@@ -1650,6 +2347,7 @@ async function loadRadar(preferredSource) {
   const wasAnimating = isRadarAnimating();
   stopRadarAnimation();
   setRadarLoading(requestedSource);
+  markSourcePending('radar');
 
   try {
     let radarData;
@@ -1674,13 +2372,17 @@ async function loadRadar(preferredSource) {
     state.radarLayerName = radarData.layerName || '';
     state.radarFrames = radarData.frames;
     state.radarFrameIndex = radarData.frames.length - 1;
-    state.radarFallbackUsed = usedFallback;
+    // A tile-level fallback re-enters here asking for RainViewer on a station that has
+    // one; that is still a fallback, so the flag survives until the next NWS attempt.
+    state.radarFallbackUsed = usedFallback ||
+      (preferredSource === 'rainviewer' && state.radarFallbackUsed && Boolean(state.radarStation));
     resetRadarLayers();
     setRadarZoomLimit(radarData.maxZoom);
     setRadarControls(true);
     setRadarStatus('ready', radarData.status);
     renderRadarFrame(state.radarFrameIndex);
     updateRadarFreshness(false);
+    recordRadarHealth();
     state.radarRefreshCheckedAt = Date.now();
     preloadRadarNeighbors();
     if (wasAnimating) startRadarAnimation();
@@ -1700,6 +2402,7 @@ async function loadRadar(preferredSource) {
       navigator.onLine ? 'Radar service unavailable' : 'Offline - radar unavailable',
       true
     );
+    markSourceFailure('radar', error, 'Radar service unavailable.');
     showToast('Radar services are temporarily unavailable. Use Retry radar to try again.');
   } finally {
     if (state.radarController === controller) {
@@ -1719,8 +2422,8 @@ async function loadRainViewerRadarData(signal) {
   });
   const host = safeHttpsOrigin(data && data.host);
   const frames = getRadarFrames(data);
-  if (!host) throw new Error('RainViewer returned an invalid tile host.');
-  if (!frames.length) throw new Error('RainViewer returned no radar frames.');
+  if (!host) throw providerError('RainViewer returned an invalid tile host.');
+  if (!frames.length) throw providerError('RainViewer returned no radar frames.');
   return {
     source: 'rainviewer',
     host: host,
@@ -1744,12 +2447,12 @@ async function loadNwsRadarData(station, signal) {
     retries: 1
   });
   const xml = new DOMParser().parseFromString(xmlText, 'application/xml');
-  if (xml.querySelector('parsererror')) throw new Error('NWS returned invalid radar metadata.');
+  if (xml.querySelector('parsererror')) throw providerError('NWS returned invalid radar metadata.');
 
   const layer = Array.from(xml.getElementsByTagNameNS('*', 'Layer')).find(function (candidate) {
     return getDirectChildText(candidate, 'Name') === layerName;
   });
-  if (!layer) throw new Error('NWS super-resolution radar is unavailable for ' + stationId + '.');
+  if (!layer) throw providerError('NWS super-resolution radar is unavailable for ' + stationId + '.');
   const dimension = Array.from(layer.children).find(function (child) {
     return child.localName === 'Dimension' && child.getAttribute('name') === 'time';
   });
@@ -1763,7 +2466,7 @@ async function loadNwsRadarData(station, signal) {
     })
     .filter(Boolean)
     .slice(-RADAR_FRAME_LIMIT);
-  if (!frames.length) throw new Error('NWS returned no super-resolution radar frames.');
+  if (!frames.length) throw providerError('NWS returned no super-resolution radar frames.');
 
   return {
     source: 'nws',
@@ -1900,6 +2603,7 @@ function handleRadarTileError(entry) {
   if (entry.failures >= 7) {
     stopRadarAnimation();
     setRadarError('Radar tiles unavailable', true);
+    markSourceFailure('radar', providerError('Radar tiles failed to load.'), 'Radar tiles unavailable.');
   }
 }
 
@@ -2030,10 +2734,12 @@ async function runRadarRefresh(controller) {
       : await loadRainViewerRadarData(controller.signal);
     if (isStale()) return;
     reconcileRadarFrames(radarData);
+    recordRadarHealth();
   } catch (error) {
     if (isAbortError(error) || isStale()) return;
     console.warn('Radar refresh failed; keeping the frames already loaded.', error);
     updateRadarFreshness(true);
+    markSourceFailure('radar', error, 'Radar update failed; showing the last loaded frames.');
   } finally {
     if (state.radarRefreshController === controller) {
       state.radarRefreshController = null;
@@ -2220,9 +2926,17 @@ function updateMapPosition(lat, lon) {
 }
 
 function handleVisibilityChange() {
+  // One age-refresh timer: stopped while hidden, re-armed (after an immediate refresh) when shown.
+  if (document.hidden) stopSourceHealthTimer();
+  else updateSourceHealthUi();
+  if (document.hidden) {
+    window.clearTimeout(state.severeTimer);
+    state.severeTimer = 0;
+  }
   if (document.hidden) window.clearTimeout(state.alertTimer);
   else {
     renderWarningBanner();
+    renderSevereMode();
     refreshLocationAlerts();
   }
   if (document.hidden) stopRadarRefresh();
@@ -2246,6 +2960,355 @@ function getDirectChildText(element, localName) {
     return candidate.localName === localName;
   });
   return String(child && child.textContent || '').trim();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Source health. Derived only from requests the app already makes; nothing here fetches.
+
+function createSourceRecord() {
+  return {
+    status: 'idle',
+    lastAttemptAt: 0,
+    lastSuccessAt: 0,
+    dataTime: NaN,
+    failureKind: '',
+    detail: ''
+  };
+}
+
+function createSourceHealth() {
+  const health = {};
+  SOURCE_DEFS.forEach(function (def) { health[def.key] = createSourceRecord(); });
+  return health;
+}
+
+// A deliberate "the provider sent something unusable" error, as opposed to a bug of ours.
+function providerError(message) {
+  const error = new Error(message);
+  error.provider = true;
+  return error;
+}
+
+function tagProviderError(error, url) {
+  if (!error || typeof error !== 'object' || isAbortError(error)) return error;
+  try {
+    error.provider = true;
+    if (!error.url) error.url = url;
+  } catch {
+    // A frozen error object cannot be tagged; it will simply be classified as an app error.
+  }
+  return error;
+}
+
+// 'offline' | 'provider' | 'app' ('' for an abort, which is never a failure).
+function classifySourceError(error) {
+  if (isAbortError(error)) return '';
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return 'offline';
+  if (error && (error.provider === true || Number.isFinite(error.status) || error.timedOut === true)) {
+    return 'provider';
+  }
+  return 'app';
+}
+
+// Pure. Age is judged against maxAgeMs (0 or omitted = no age limit). A failed record
+// stays 'failed' even though it keeps its last good dataTime.
+function getSourceFreshness(record, nowMs, maxAgeMs) {
+  if (!record || record.status === 'idle') return 'idle';
+  if (record.status === 'failed') return 'failed';
+  if (record.status === 'pending') return 'pending';
+  if (record.status === 'stale') return 'stale';
+  if (maxAgeMs > 0 && Number.isFinite(record.dataTime) && nowMs - record.dataTime > maxAgeMs) return 'stale';
+  return 'ok';
+}
+
+function markSourcePending(key) {
+  const record = state.sourceHealth[key];
+  if (!record) return;
+  record.lastAttemptAt = Date.now();
+  // A source that already has good data keeps showing it while it re-checks, so routine
+  // polling never flickers; only a source with nothing (or a failure) shows "Checking".
+  if (record.status !== 'ok' && record.status !== 'stale') {
+    record.status = 'pending';
+    record.failureKind = '';
+    record.detail = '';
+  }
+  updateSourceHealthUi();
+}
+
+function markSourceSuccess(key, dataTimeMs, detail) {
+  const record = state.sourceHealth[key];
+  if (!record) return;
+  record.status = 'ok';
+  record.lastAttemptAt = Date.now();
+  record.lastSuccessAt = record.lastAttemptAt;
+  record.dataTime = Number.isFinite(dataTimeMs) ? dataTimeMs : NaN;
+  record.failureKind = '';
+  record.detail = detail || '';
+  updateSourceHealthUi();
+}
+
+// The request worked but the data is not usable as current (for example an observation
+// that is too old); the app is falling back to something else.
+function markSourceStale(key, dataTimeMs, detail) {
+  const record = state.sourceHealth[key];
+  if (!record) return;
+  record.status = 'stale';
+  record.lastAttemptAt = Date.now();
+  record.lastSuccessAt = record.lastAttemptAt;
+  record.dataTime = Number.isFinite(dataTimeMs) ? dataTimeMs : NaN;
+  record.failureKind = '';
+  record.detail = detail || '';
+  updateSourceHealthUi();
+}
+
+function markSourceIdle(key, detail) {
+  const record = state.sourceHealth[key];
+  if (!record) return;
+  record.status = 'idle';
+  record.lastSuccessAt = 0;
+  record.dataTime = NaN;
+  record.failureKind = '';
+  record.detail = detail || '';
+  updateSourceHealthUi();
+}
+
+// Keeps the last good dataTime so the panel can still say how old the data on screen is.
+function markSourceFailure(key, error, detail) {
+  const record = state.sourceHealth[key];
+  if (!record || isAbortError(error)) return;
+  record.status = 'failed';
+  record.lastAttemptAt = Date.now();
+  record.failureKind = classifySourceError(error) || 'app';
+  record.detail = describeSourceFailure(record.failureKind, error, detail);
+  updateSourceHealthUi();
+}
+
+function describeSourceFailure(kind, error, context) {
+  const suffix = context ? ' ' + context : '';
+  if (kind === 'offline') return 'This device is offline — not a provider or app problem.' + suffix;
+  if (kind === 'app') return 'Unexpected app error — reload the page; if it persists, report it.' + suffix;
+  let host = '';
+  try { host = new URL(error && error.url).host; } catch { host = ''; }
+  let cause;
+  if (error && Number.isFinite(error.status)) cause = 'HTTP ' + error.status + (host ? ' from ' + host : '');
+  else if (error && error.timedOut) cause = 'Request' + (host ? ' to ' + host : '') + ' timed out';
+  else if (host) cause = 'Could not get a usable response from ' + host;
+  else cause = (error && error.message) || 'Provider returned unusable data';
+  return cause.replace(/\.$/, '') + ' — provider problem, not the app.' + suffix;
+}
+
+function resetLocationSourceHealth() {
+  const now = Date.now();
+  SOURCE_DEFS.forEach(function (def) {
+    if (!def.byLocation) return;
+    const record = createSourceRecord();
+    record.status = 'pending';
+    record.lastAttemptAt = now;
+    state.sourceHealth[def.key] = record;
+  });
+  updateSourceHealthUi();
+}
+
+function idleUnstartedLocationSources(detail) {
+  ['observations', 'precip', 'discussion'].forEach(function (key) {
+    const record = state.sourceHealth[key];
+    if (record.status === 'pending' && !record.lastSuccessAt) markSourceIdle(key, detail);
+  });
+}
+
+function recordObservationHealth(observation) {
+  if (!observation) {
+    markSourceIdle('observations', 'No recent station observation was available; showing forecast values.');
+    return;
+  }
+  const reading = readObservation(observation, Date.now());
+  const station = reading.stationId ? ' from ' + reading.stationId : '';
+  if (reading.status === 'ok') {
+    markSourceSuccess('observations', reading.observedAt, 'Latest observation' + station + ' is in use.');
+  } else if (reading.status === 'outdated') {
+    markSourceStale('observations', reading.observedAt, 'Showing forecast values; latest observation' +
+      station + ' is ' + formatDataAge(reading.ageMs) + ', too old to show as current.');
+  } else {
+    markSourceStale('observations', reading.observedAt, 'Showing forecast values; the latest observation' +
+      station + ' had no usable readings.');
+  }
+}
+
+function recordPrecipHealth(gridData, precipMm) {
+  if (!gridData) {
+    markSourceIdle('precip', 'NWS did not provide gridpoint data for this location.');
+    return;
+  }
+  const updated = Date.parse(gridData.properties && gridData.properties.updateTime);
+  const amounts = Number.isFinite(precipMm)
+    ? 'Next 24 hour precipitation amounts loaded.'
+    : 'Gridpoint data had no precipitation amounts.';
+  markSourceSuccess('precip', Number.isFinite(updated) ? updated : Date.now(),
+    Number.isFinite(updated) ? amounts : amounts + ' NWS gave no update time, so the check time is shown.');
+}
+
+function describeRadarProvider() {
+  if (state.radarFallbackUsed) {
+    return 'Fallback active: RainViewer HD (NWS super-resolution unavailable)';
+  }
+  if (state.radarSource === 'nws') return 'Active: NWS ' + state.radarStation + ' super-res';
+  return 'Active: RainViewer HD';
+}
+
+function recordRadarHealth() {
+  const latest = getLatestRadarScanTime(state.radarFrames);
+  markSourceSuccess('radar', Number.isFinite(latest) ? latest * 1000 : NaN, 'Latest radar scan loaded.');
+}
+
+function formatDataAge(ageMs) {
+  const text = formatObservationAge(ageMs);
+  return text === 'just now' ? 'under 1 min old' : text.replace(/ ago$/, ' old');
+}
+
+function formatThreshold(ms) {
+  return ms >= 3600000 ? Math.round(ms / 3600000) + ' h' : Math.round(ms / 60000) + ' min';
+}
+
+// Everything the panel and the summary pill show, from the registry alone.
+function getSourceHealthRows(nowMs) {
+  const rows = [];
+  SOURCE_DEFS.forEach(function (def) {
+    const record = state.sourceHealth[def.key];
+    if (def.optional && !record.lastAttemptAt && !record.lastSuccessAt) return;
+    const freshness = getSourceFreshness(record, nowMs, def.maxAgeMs);
+    const hasData = Number.isFinite(record.dataTime);
+    let statusText = SOURCE_STATUS_TEXT[freshness];
+    if (freshness === 'failed') {
+      statusText = record.failureKind === 'offline' ? 'Offline'
+        : (record.failureKind === 'provider' ? 'Provider error' : 'App error');
+    }
+
+    let detail = record.detail;
+    if (def.key === 'radar' && freshness !== 'failed') {
+      detail = freshness === 'pending' ? 'Connecting to radar…' : describeRadarProvider();
+    }
+    if (freshness === 'stale' && record.status === 'ok') {
+      detail = 'No newer data in more than ' + formatThreshold(def.maxAgeMs) + '. ' + detail;
+    }
+
+    let ageText = '—';
+    if (!def.noAge) {
+      if (hasData) {
+        ageText = (freshness === 'failed' ? 'Last good data: ' : '') +
+          formatDataAge(Math.max(0, nowMs - record.dataTime));
+        if (Math.abs(record.dataTime - record.lastSuccessAt) >= 60000) {
+          ageText += ' (data from ' + formatClockTime(new Date(record.dataTime)) + ')';
+        }
+      } else if (freshness === 'failed') ageText = 'No good data yet';
+      else if (record.lastSuccessAt) ageText = 'Age not reported';
+    }
+
+    rows.push({
+      key: def.key,
+      name: def.name,
+      freshness: freshness,
+      level: freshness === 'failed' ? 'issue' : freshness,
+      statusText: statusText,
+      lastSuccessText: record.lastSuccessAt ? formatClockTime(new Date(record.lastSuccessAt)) : '—',
+      ageText: ageText,
+      detail: detail
+    });
+  });
+  return rows;
+}
+
+function summarizeSourceHealth(rows) {
+  const count = function (freshness) {
+    return rows.filter(function (row) { return row.freshness === freshness; }).length;
+  };
+  const issues = count('failed');
+  const stale = count('stale');
+  const pending = count('pending');
+  const parts = [];
+  if (issues) parts.push(issues + (issues === 1 ? ' issue' : ' issues'));
+  if (stale) parts.push(stale + ' stale');
+  let level = 'ok';
+  let text = 'all current';
+  if (parts.length) {
+    level = issues ? 'issue' : 'stale';
+    text = parts.join(', ');
+  } else if (pending) {
+    level = 'checking';
+    text = 'checking';
+  }
+  return {
+    visible: rows.some(function (row) { return row.freshness !== 'idle'; }),
+    level: level,
+    text: 'Data sources: ' + text
+  };
+}
+
+function makeHealthNode(tag, className, text) {
+  const node = document.createElement(tag);
+  node.className = className;
+  node.textContent = text;
+  return node;
+}
+
+function buildSourceHealthRow(row) {
+  const item = document.createElement('li');
+  item.className = 'health-row';
+  item.dataset.source = row.key;
+  item.dataset.state = row.level;
+  const facts = document.createElement('dl');
+  facts.className = 'health-facts';
+  [['Last success', row.lastSuccessText], ['Data age', row.ageText]].forEach(function (pair) {
+    const group = document.createElement('div');
+    group.append(makeHealthNode('dt', 'health-label', pair[0]), makeHealthNode('dd', 'health-value', pair[1]));
+    facts.append(group);
+  });
+  item.append(
+    makeHealthNode('span', 'health-name', row.name),
+    makeHealthNode('span', 'health-status', row.statusText),
+    facts,
+    makeHealthNode('p', 'health-detail', row.detail)
+  );
+  return item;
+}
+
+function updateSourceHealthUi() {
+  const rows = getSourceHealthRows(Date.now());
+  const summary = summarizeSourceHealth(rows);
+  // Only touch the DOM when something visible changed, so the once-a-minute tick and
+  // repeated polling results do not churn the page or re-announce an unchanged label.
+  const signature = JSON.stringify([summary, rows]);
+  if (signature !== state.sourceHealthSignature) {
+    state.sourceHealthSignature = signature;
+    if (el.sourceHealthSummary.textContent !== summary.text) el.sourceHealthSummary.textContent = summary.text;
+    el.sourceHealthSummary.dataset.state = summary.level;
+    el.sourceHealthSummary.classList.toggle('hidden', !summary.visible);
+    el.sourceHealthList.replaceChildren(...rows.map(buildSourceHealthRow));
+  }
+  el.sourceHealthSummary.setAttribute('aria-expanded', String(Boolean(el.sourceHealth.open)));
+  updateSevereFreshness();
+  if (summary.visible) scheduleSourceHealthTick();
+}
+
+// A single timer refreshes the ages once a minute, only while the page is visible.
+function scheduleSourceHealthTick() {
+  if (state.sourceHealthTimer || document.hidden) return;
+  state.sourceHealthTimer = window.setTimeout(function () {
+    state.sourceHealthTimer = 0;
+    updateSourceHealthUi();
+  }, SOURCE_HEALTH_TICK_MS);
+}
+
+function stopSourceHealthTimer() {
+  window.clearTimeout(state.sourceHealthTimer);
+  state.sourceHealthTimer = 0;
+}
+
+function openSourceHealth() {
+  el.sourceHealth.open = true;
+  updateSourceHealthUi();
+  const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  el.sourceHealth.scrollIntoView({ block: 'start', behavior: reduceMotion ? 'auto' : 'smooth' });
+  el.sourceHealthToggle.focus({ preventScroll: true });
 }
 
 async function fetchJson(url, options) {
@@ -2276,16 +3339,22 @@ async function fetchResource(url, options, responseType) {
     }, timeoutMs);
 
     try {
-      const response = await fetch(url, { headers: headers, signal: controller.signal });
+      const init = { headers: headers, signal: controller.signal };
+      if (config.cache) init.cache = config.cache;
+      const response = await fetch(url, init);
       if (!response.ok) {
         const error = new Error('Request failed with status ' + response.status + '.');
         error.status = response.status;
         error.url = url;
+        error.provider = true;
         throw error;
       }
       return responseType === 'text' ? await response.text() : await response.json();
     } catch (error) {
       if (config.signal && config.signal.aborted) throw createAbortError();
+      // Everything thrown above comes from the request or its response (network failure,
+      // HTTP status, unparseable body), so it is the provider's problem, not the app's.
+      tagProviderError(error, url);
       const retryable = timedOut
         || !error.status
         || error.status === 429
@@ -2294,7 +3363,11 @@ async function fetchResource(url, options, responseType) {
         await wait(350 * Math.pow(2, attempt), config.signal);
         continue;
       }
-      if (timedOut) throw new Error('The request timed out. Please try again.');
+      if (timedOut) {
+        const timeoutError = new Error('The request timed out. Please try again.');
+        timeoutError.timedOut = true;
+        throw tagProviderError(timeoutError, url);
+      }
       throw error;
     } finally {
       window.clearTimeout(timeout);

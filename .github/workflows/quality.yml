@@ -22,6 +22,7 @@ jobs:
         run: |
           node --check app.js
           node --check alert-geography.js
+          node --check severe-weather.js
           node --check status.js
           node --check scripts/nc-status.mjs
           node --check scripts/refresh-nc-status.mjs

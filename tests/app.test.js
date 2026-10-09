@@ -15,6 +15,7 @@ function createElement() {
   return {
     addEventListener() {},
     append() {},
+    contains() { return false; },
     classList: {
       add(...names) { names.forEach((name) => classes.add(name)); },
       contains(name) { return classes.has(name); },
@@ -28,6 +29,7 @@ function createElement() {
     },
     dataset: {},
     disabled: false,
+    querySelectorAll() { return []; },
     replaceChildren() {},
     setAttribute() {},
     style: {},
@@ -71,6 +73,20 @@ function loadAppForTesting() {
     ;globalThis.__weatherTestApi = {
       calculate24HourPrecip,
       calculateFeelsLike,
+      classifySourceError,
+      createSourceHealth,
+      fetchResource,
+      getSourceFreshness,
+      getSourceHealthRows,
+      markSourceFailure,
+      markSourcePending,
+      markSourceSuccess,
+      providerError,
+      recordObservationHealth,
+      summarizeSourceHealth,
+      discussionSourceUrl,
+      readDiscussionProduct,
+      parseDiscussionSections,
       distanceMiles,
       distanceToMiles,
       ensureRadarLayer,
@@ -112,12 +128,17 @@ function loadAppForTesting() {
       getThreatWarnings,
       refreshLocationAlerts,
       renderWarningBanner,
+      renderSevereMode,
+      buildSevereFreshness,
+      formatSevereTime,
+      toggleSevereMinimized,
       safeHttpsOrigin,
       safeUrl,
       state,
       toDateKey
     };
   `;
+  vm.runInContext(fs.readFileSync(path.join(projectRoot, 'severe-weather.js'), 'utf8'), context, { filename: 'severe-weather.js' });
   vm.runInContext(source, context, { filename: appPath });
   return { api: context.__weatherTestApi, context, elements };
 }
@@ -1036,4 +1057,339 @@ test('a radar refresh that finishes after a full reload is discarded', async () 
   pending.resolve(radarData(10, 20, 30, 40));
   await refresh;
   assert.equal(api.state.radarFrames[3].iso, radarFrame(30).iso);
+});
+
+const SAMPLE_AFD = `
+000
+FXUS62 KRAH 082340
+AFDRAH
+
+Area Forecast Discussion
+National Weather Service Raleigh NC
+740 PM EDT Thu Oct 8 2026
+
+.WHAT HAS CHANGED...
+
+* After Isaias weakens ...
+\x20
+&&
+
+.KEY MESSAGES...
+As of 255 PM Thursday...
+
+1) Above normal temperatures ...
+
+&&
+
+.AVIATION /00Z Friday THROUGH Wednesday/...
+  VFR expected.
+&&
+
+.RAH WATCHES/WARNINGS/ADVISORIES...
+None.
+&&
+
+$$
+
+SHORT TERM...Smith
+`;
+
+test('readDiscussionProduct accepts a complete product and rejects incomplete ones', () => {
+  const { api } = loadAppForTesting();
+  const product = {
+    id: 'b-2',
+    issuanceTime: '2026-10-08T23:40:00+00:00',
+    issuingOffice: 'KRAH',
+    productText: '\nAFDRAH\n.KEY MESSAGES...\nText\n&&\n'
+  };
+  const read = api.readDiscussionProduct(product);
+  assert.equal(read.id, 'b-2');
+  assert.equal(read.issuingOffice, 'KRAH');
+  assert.equal(read.text, product.productText);
+  assert.equal(api.readDiscussionProduct({ ...product, id: 'bad id!' }), null);
+  assert.equal(api.readDiscussionProduct({ ...product, issuanceTime: 'not a date' }), null);
+  assert.equal(api.readDiscussionProduct({ ...product, productText: '  ' }), null);
+  assert.equal(api.readDiscussionProduct(null), null);
+});
+
+test('parseDiscussionSections splits on headers and ends at && or $$', () => {
+  const { api } = loadAppForTesting();
+  const sections = Array.from(api.parseDiscussionSections(SAMPLE_AFD));
+  assert.deepEqual(sections.map((section) => section.title), [
+    'WHAT HAS CHANGED',
+    'KEY MESSAGES',
+    'AVIATION /00Z Friday THROUGH Wednesday/',
+    'RAH WATCHES/WARNINGS/ADVISORIES'
+  ]);
+  assert.equal(sections[0].body, '* After Isaias weakens ...');
+  assert.equal(sections[1].body, 'As of 255 PM Thursday...\n\n1) Above normal temperatures ...');
+  assert.equal(sections[2].body, '  VFR expected.');
+  assert.equal(sections[3].body, 'None.');
+  assert.ok(!sections.some((section) => /Smith/.test(section.body)), 'text after $$ is not part of a section');
+});
+
+test('parseDiscussionSections ends a section at $$ and returns [] without headers', () => {
+  const { api } = loadAppForTesting();
+  const sections = Array.from(api.parseDiscussionSections('.NEAR TERM...\nLine one\n\n$$\nTrailing'));
+  assert.equal(sections.length, 1);
+  assert.equal(sections[0].body, 'Line one');
+  assert.equal(api.parseDiscussionSections('Just some plain text\nwith no headers').length, 0);
+  assert.equal(api.parseDiscussionSections('').length, 0);
+});
+
+test('discussionSourceUrl builds the official product link only for valid offices', () => {
+  const { api } = loadAppForTesting();
+  assert.equal(
+    api.discussionSourceUrl('RAH'),
+    'https://forecast.weather.gov/product.php?site=NWS&issuedby=RAH&product=AFD&format=txt&version=1&glossary=0'
+  );
+  assert.equal(api.discussionSourceUrl('rah').includes('issuedby=RAH'), true);
+  assert.equal(api.discussionSourceUrl('RAH&x=1'), '');
+  assert.equal(api.discussionSourceUrl(''), '');
+});
+
+// ---------------------------------------------------------------------------
+// Source health
+// ---------------------------------------------------------------------------
+
+test('classifySourceError separates offline, provider, app errors and aborts', () => {
+  const { api, context } = loadAppForTesting();
+  const status = Object.assign(new Error('HTTP'), { status: 503 });
+  assert.equal(api.classifySourceError(status), 'provider');
+  assert.equal(api.classifySourceError(Object.assign(new Error('timeout'), { timedOut: true })), 'provider');
+  assert.equal(api.classifySourceError(api.providerError('NWS did not return forecast endpoints.')), 'provider');
+  assert.equal(api.classifySourceError(new Error('x is not a function')), 'app');
+  // A bare TypeError is far more likely our own rendering bug than a network failure.
+  assert.equal(api.classifySourceError(new TypeError('Cannot read properties of null')), 'app');
+  assert.equal(api.classifySourceError(new DOMException('Aborted', 'AbortError')), '');
+  context.navigator.onLine = false;
+  assert.equal(api.classifySourceError(status), 'offline');
+  assert.equal(api.classifySourceError(new Error('x')), 'offline');
+});
+
+test('fetchResource tags network, HTTP, timeout and parse failures as provider errors', async () => {
+  const { api, context } = loadAppForTesting();
+  context.fetch = async () => { throw new TypeError('Failed to fetch'); };
+  await assert.rejects(api.fetchResource('https://api.weather.gov/x', {}, 'json'), (error) => {
+    assert.equal(error.message, 'Failed to fetch');
+    return api.classifySourceError(error) === 'provider' && error.url === 'https://api.weather.gov/x';
+  });
+  context.fetch = async () => ({ ok: false, status: 503 });
+  await assert.rejects(api.fetchJson('https://api.weather.gov/x'), (error) =>
+    error.status === 503 && error.message === 'Request failed with status 503.' &&
+    api.classifySourceError(error) === 'provider');
+  context.fetch = async () => ({ ok: true, json: async () => { throw new SyntaxError('Unexpected token'); } });
+  await assert.rejects(api.fetchJson('https://api.weather.gov/x'), (error) =>
+    api.classifySourceError(error) === 'provider');
+  context.fetch = (_url, options) => new Promise((_resolve, reject) => {
+    options.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+  });
+  await assert.rejects(api.fetchJson('https://api.weather.gov/x', { timeoutMs: 5 }), (error) =>
+    error.message === 'The request timed out. Please try again.' &&
+    api.classifySourceError(error) === 'provider');
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(api.fetchJson('https://api.weather.gov/x', { signal: controller.signal }),
+    (error) => api.classifySourceError(error) === '');
+});
+
+test('getSourceFreshness judges age, keeps failures failed, and reports pending and idle', () => {
+  const { api } = loadAppForTesting();
+  const now = 10 * 3600000;
+  const record = (overrides) => ({ status: 'ok', dataTime: now - 60000, ...overrides });
+  assert.equal(api.getSourceFreshness(record(), now, 3600000), 'ok');
+  assert.equal(api.getSourceFreshness(record({ dataTime: now - 3600001 }), now, 3600000), 'stale');
+  assert.equal(api.getSourceFreshness(record({ dataTime: now - 99 * 3600000 }), now, 0), 'ok');
+  assert.equal(api.getSourceFreshness(record({ dataTime: NaN }), now, 3600000), 'ok');
+  // A failure keeps its last good dataTime but is still a failure, however fresh that data is.
+  assert.equal(api.getSourceFreshness(record({ status: 'failed' }), now, 3600000), 'failed');
+  assert.equal(api.getSourceFreshness(record({ status: 'pending', dataTime: NaN }), now, 3600000), 'pending');
+  assert.equal(api.getSourceFreshness(record({ status: 'idle' }), now, 3600000), 'idle');
+  assert.equal(api.getSourceFreshness(record({ status: 'stale' }), now, 3600000), 'stale');
+});
+
+test('source records keep last good data on failure and never record aborts', () => {
+  const { api, context } = loadAppForTesting();
+  const health = api.state.sourceHealth;
+  const dataTime = Date.now() - 20 * 60000;
+  api.markSourceSuccess('forecast', dataTime, 'ok');
+  api.markSourceFailure('forecast', Object.assign(new Error('x'), { status: 503, url: 'https://api.weather.gov/gridpoints' }), 'Context.');
+  assert.equal(health.forecast.status, 'failed');
+  assert.equal(health.forecast.failureKind, 'provider');
+  assert.equal(health.forecast.dataTime, dataTime);
+  assert.match(health.forecast.detail, /HTTP 503 from api\.weather\.gov \u2014 provider problem, not the app/);
+  const row = Array.from(api.getSourceHealthRows(Date.now())).find((entry) => entry.key === 'forecast');
+  assert.equal(row.statusText, 'Provider error');
+  assert.match(row.ageText, /^Last good data: 20 min old/);
+
+  api.markSourceFailure('alerts', new DOMException('Aborted', 'AbortError'), 'x');
+  assert.equal(health.alerts.status, 'idle');
+  api.markSourceFailure('alerts', new Error('boom'), 'x');
+  assert.equal(health.alerts.failureKind, 'app');
+  assert.match(health.alerts.detail, /Unexpected app error/);
+  context.navigator.onLine = false;
+  api.markSourceFailure('alerts', new Error('boom'), 'x');
+  assert.equal(health.alerts.failureKind, 'offline');
+  context.navigator.onLine = true;
+
+  // Re-checking a source that already has data does not blank it; one without data shows Checking.
+  api.markSourceSuccess('alerts', Date.now(), 'ok');
+  api.markSourcePending('alerts');
+  assert.equal(health.alerts.status, 'ok');
+  api.markSourcePending('discussion');
+  assert.equal(health.discussion.status, 'pending');
+});
+
+test('health summary counts issues and stale sources and hides unused optional ones', () => {
+  const { api } = loadAppForTesting();
+  assert.equal(api.summarizeSourceHealth(api.getSourceHealthRows(Date.now())).visible, false);
+  assert.equal(
+    Array.from(api.getSourceHealthRows(Date.now())).some((row) => row.key === 'zip' || row.key === 'basemap'),
+    false
+  );
+  const now = Date.now();
+  api.markSourceSuccess('forecast', now, '');
+  api.markSourceSuccess('alerts', now - 6 * 60000, '');
+  api.markSourceSuccess('radar', now - 5 * 60000, '');
+  let summary = api.summarizeSourceHealth(api.getSourceHealthRows(now));
+  assert.equal(summary.text, 'Data sources: 1 stale');
+  assert.equal(summary.level, 'stale');
+  api.markSourceFailure('discussion', Object.assign(new Error('x'), { status: 503 }), '');
+  summary = api.summarizeSourceHealth(api.getSourceHealthRows(now));
+  assert.equal(summary.text, 'Data sources: 1 issue, 1 stale');
+  assert.equal(summary.level, 'issue');
+  api.markSourceSuccess('alerts', now, '');
+  api.markSourceSuccess('discussion', now, '');
+  assert.equal(api.summarizeSourceHealth(api.getSourceHealthRows(now)).text, 'Data sources: all current');
+});
+
+test('an outdated observation is shown as stale with the forecast fallback explained', () => {
+  const { api } = loadAppForTesting();
+  api.recordObservationHealth({
+    stationId: 'KRDU',
+    properties: observationProperties({ timestamp: minutesAgo(130) })
+  });
+  const row = Array.from(api.getSourceHealthRows(Date.now())).find((entry) => entry.key === 'observations');
+  assert.equal(row.statusText, 'Stale');
+  assert.match(row.detail, /Showing forecast values; latest observation from KRDU is 2 h 10 min old/);
+  api.recordObservationHealth(null);
+  assert.equal(api.state.sourceHealth.observations.status, 'idle');
+});
+
+test('a loaded forecast marks its sources current with data times', async () => {
+  const { api, context } = loadAppForTesting();
+  installForecastFetch(context);
+  await api.loadForecast(35, -97);
+  await api.state.forecastLoad.optional;
+  await flush();
+  const health = api.state.sourceHealth;
+  assert.equal(health.forecast.status, 'ok');
+  assert.equal(health.forecast.dataTime, Date.parse('2026-10-09T12:00:00-04:00'));
+  assert.equal(health.observations.status, 'ok');
+  assert.equal(health.precip.status, 'ok');
+  assert.equal(health.alerts.status, 'ok');
+  assert.equal(health.discussion.status, 'idle', 'the stub has no AFD product (404): no discussion on file, not a failure');
+});
+
+test('provider failures and app failures are recorded differently during a load', async () => {
+  const { api, context } = loadAppForTesting();
+  installForecastFetch(context, { 'A:daily': { __status: 404 }, 'A:hourly': { __status: 404 }, 'A:stations': { __status: 404 } });
+  await api.loadForecast(35, -97);
+  await api.state.forecastLoad.optional;
+  const health = api.state.sourceHealth;
+  assert.equal(health.forecast.status, 'failed');
+  assert.equal(health.forecast.failureKind, 'provider');
+  assert.match(health.forecast.detail, /HTTP 404/);
+  assert.equal(health.observations.failureKind, 'provider');
+  assert.equal(health.precip.status, 'ok', 'one failing provider call does not mark the others failed');
+
+  // An exception from our own rendering code is an app error and does not stop the other steps.
+  const second = loadAppForTesting();
+  installForecastFetch(second.context);
+  vm.runInContext("renderHourly = function () { throw new Error('render bug'); };", second.context);
+  await second.api.loadForecast(35, -97);
+  assert.equal(second.api.state.sourceHealth.forecast.status, 'failed');
+  assert.equal(second.api.state.sourceHealth.forecast.failureKind, 'app');
+  assert.equal(second.elements.get('#dailyOffice').textContent, 'OFFA office');
+});
+
+test('a superseded forecast load cannot change the health registry', async () => {
+  const { api, context } = loadAppForTesting();
+  const pointsA = deferred();
+  installForecastFetch(context, { 'A:points': pointsA.promise });
+  const loadA = api.loadForecast(35, -97);
+  await api.loadForecast(36, -98);
+  await api.state.forecastLoad.optional;
+  await flush();
+  const before = JSON.stringify(api.state.sourceHealth);
+  pointsA.resolve({ __status: 404 });
+  await loadA;
+  await flush();
+  assert.equal(JSON.stringify(api.state.sourceHealth), before);
+  assert.equal(api.state.sourceHealth.forecast.status, 'ok');
+});
+
+function severeFeature(overrides, id) {
+  const now = Date.now();
+  const url = 'https://api.weather.gov/alerts/' + id;
+  return {
+    id: url,
+    properties: Object.assign({
+      '@id': url, id, status: 'Actual', messageType: 'Alert', event: 'Tornado Warning', severity: 'Extreme',
+      urgency: 'Immediate', certainty: 'Observed', areaDesc: 'Wake, NC', headline: 'Tornado Warning for Wake',
+      effective: new Date(now - 60000).toISOString(), ends: new Date(now + 25 * 60000).toISOString(),
+      expires: new Date(now + 25 * 60000).toISOString(), description: 'D', instruction: 'I'
+    }, overrides)
+  };
+}
+
+test('buildSevereFreshness reports check time, radar state and failing alert updates', () => {
+  const { api } = loadAppForTesting();
+  const now = Date.parse('2026-10-09T16:00:00Z');
+  const fmt = () => '12:41 AM';
+  const ok = { status: 'ok', lastSuccessAt: now - 30000, dataTime: now - 30000 };
+  const radar = { status: 'ok', dataTime: now - 120000, lastSuccessAt: now - 120000 };
+  const fresh = api.buildSevereFreshness(ok, radar, false, now, fmt);
+  assert.equal(fresh.text, 'Alerts checked 12:41 AM · Latest radar scan 12:41 AM');
+  assert.equal(fresh.notice, '');
+  const failed = api.buildSevereFreshness({ ...ok, status: 'failed' }, { status: 'failed', dataTime: NaN }, false, now, fmt);
+  assert.match(failed.text, /Radar unavailable/);
+  assert.equal(failed.notice, 'Alert updates are failing — showing the last warnings received at 12:41 AM. Check weather.gov or local media.');
+  assert.match(api.buildSevereFreshness(ok, radar, true, now, fmt).text, /Radar unavailable/);
+  const old = api.buildSevereFreshness({ ...ok, dataTime: now - 6 * 60000 }, radar, false, now, fmt);
+  assert.match(old.notice, /not been refreshed/);
+});
+
+test('severe panel follows active warnings and keeps minimized state per warning set', () => {
+  const { api, elements } = loadAppForTesting();
+  api.state.lat = 35.78;
+  api.state.lon = -78.64;
+  const panel = elements.get('#severePanel');
+  api.state.warningFeatures = [severeFeature({ event: 'Flood Advisory' }, 'adv')];
+  api.renderSevereMode();
+  assert.equal(panel.classList.contains('hidden'), true, 'advisories alone do not open severe mode');
+  api.state.warningFeatures = [severeFeature({}, 'a')];
+  api.renderSevereMode();
+  assert.equal(panel.classList.contains('hidden'), false);
+  assert.match(elements.get('#severeAnnouncer').textContent, /Tornado Warning/);
+  api.toggleSevereMinimized();
+  assert.equal(panel.classList.contains('is-minimized'), true);
+  api.state.warningFeatures = [severeFeature({}, 'a'), severeFeature({ event: 'Flash Flood Warning' }, 'b')];
+  api.renderSevereMode();
+  assert.equal(panel.classList.contains('is-minimized'), false, 'a new warning expands the panel again');
+  api.state.warningFeatures = [];
+  api.renderSevereMode();
+  assert.equal(panel.classList.contains('hidden'), true);
+  assert.equal(elements.get('#severeAnnouncer').textContent, '');
+});
+
+test('renderAlerts opens the severe panel and points the banner link at it', () => {
+  const { api, elements } = loadAppForTesting();
+  api.state.lat = 35.78;
+  api.state.lon = -78.64;
+  api.renderAlerts([severeFeature({}, 'a')]);
+  assert.equal(elements.get('#severePanel').classList.contains('hidden'), false);
+  assert.match(elements.get('#warningBanner').innerHTML, /href="#severeHeading"/);
+  api.renderAlerts([severeFeature({ event: 'Special Marine Warning' }, 'm')]);
+  assert.equal(elements.get('#severePanel').classList.contains('hidden'), false, 'any Warning opens severe mode');
 });

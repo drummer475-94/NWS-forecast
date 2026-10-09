@@ -13,7 +13,7 @@
     <link rel="preconnect" href="https://tilecache.rainviewer.com">
     <link rel="preconnect" href="https://opengeo.ncep.noaa.gov">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-    <link rel="stylesheet" href="styles.css?v=20261009-2">
+    <link rel="stylesheet" href="styles.css?v=20261009-5">
     <script>
       (function () {
         try {
@@ -61,11 +61,37 @@
       </header>
 
       <main id="mainContent" tabindex="-1">
+        <p class="visually-hidden" id="severeAnnouncer" role="status" aria-live="polite" aria-atomic="true"></p>
+        <section class="severe-panel hidden" id="severePanel" aria-labelledby="severeHeading">
+          <div class="severe-header">
+            <div class="section-title-group">
+              <h2 id="severeHeading" tabindex="-1">Severe weather</h2>
+              <p class="severe-location" id="severeLocation">Active warnings for your selected location</p>
+            </div>
+            <div class="severe-actions">
+              <button class="severe-button severe-button-primary" id="severeRadarButton" type="button">Show local radar</button>
+              <button class="severe-button" id="severeToggle" type="button" aria-expanded="true" aria-controls="severeBody">Minimize</button>
+            </div>
+          </div>
+          <p class="severe-summary hidden" id="severeSummary"></p>
+          <div class="severe-body" id="severeBody">
+            <p class="severe-freshness" id="severeFreshness"></p>
+            <p class="severe-notice hidden" id="severeNotice"></p>
+            <div class="severe-alerts" id="severeAlerts"></div>
+            <div class="severe-outage" id="severeOutage" aria-labelledby="severeOutageHeading">
+              <h3 class="severe-subheading" id="severeOutageHeading">Power outages</h3>
+              <p class="severe-outage-text" id="severeOutageText">Checking power outage availability&hellip;</p>
+              <a class="severe-outage-link hidden" id="severeOutageLink" href="status.html">NC outage and alert status</a>
+            </div>
+          </div>
+        </section>
+
         <section class="hero-panel" aria-labelledby="locationLabel" aria-live="polite">
           <div class="status-row hero-status">
             <div class="section-title-group">
               <h2 class="location-heading"><button type="button" class="location-disclosure" id="locationLabel" aria-expanded="true" aria-controls="zipLocationForm">Finding your location</button></h2>
               <p class="updated-label" id="updatedLabel">Use the location prompt to load your NWS forecast.</p>
+              <button type="button" class="health-pill hidden" id="sourceHealthSummary" data-state="checking" aria-controls="sourceHealth" aria-expanded="false">Data sources: checking</button>
             </div>
             <span class="source-pill">Official NWS data</span>
           </div>
@@ -136,10 +162,29 @@
           <div class="daily-list" id="dailyForecast"></div>
         </section>
 
+        <section class="section-block discussion-block hidden" id="discussionSection" aria-labelledby="discussionHeading">
+          <div class="section-heading">
+            <div class="section-title-group">
+              <h2 id="discussionHeading">Forecast discussion</h2>
+            </div>
+            <span class="section-meta" id="discussionMeta">--</span>
+          </div>
+          <p class="discussion-intro">The forecasters&rsquo; own technical discussion, shown exactly as the National Weather Service published it. It is not summarized or reworded here.</p>
+          <p class="discussion-status" id="discussionStatus" role="status" aria-live="polite"></p>
+          <p class="discussion-note hidden" id="discussionNote" role="status"></p>
+          <details class="discussion-details hidden" id="discussionDetails">
+            <summary>Read the full discussion</summary>
+            <div class="discussion-body" id="discussionBody"></div>
+          </details>
+          <p class="discussion-source">
+            <a id="discussionSource" href="https://forecast.weather.gov/" target="_blank" rel="noreferrer">Official discussion on weather.gov</a>
+          </p>
+        </section>
+
         <section class="section-block radar-block" aria-labelledby="radarHeading">
           <div class="section-heading">
             <div class="section-title-group">
-              <h2 id="radarHeading">Live weather radar</h2>
+              <h2 id="radarHeading" tabindex="-1">Live weather radar</h2>
             </div>
             <span class="section-meta" id="radarTimestamp" role="status" aria-live="polite">Loading radar</span>
           </div>
@@ -194,12 +239,19 @@
             <a href="https://www.rainviewer.com/" target="_blank" rel="noreferrer">RainViewer</a>.
           </p>
         </section>
+
+        <details class="section-block health-block" id="sourceHealth">
+          <summary id="sourceHealthToggle"><h2 id="sourceHealthHeading">Data sources</h2></summary>
+          <p class="health-legend">A <strong>provider error</strong> means a weather or map service did not answer or sent unusable data; the app is working. An <strong>app error</strong> means this page hit an unexpected problem of its own. Ages come from the requests this page already makes, not from extra checks.</p>
+          <ul class="health-list" id="sourceHealthList" aria-labelledby="sourceHealthHeading"></ul>
+        </details>
       </main>
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-    <script src="app.js?v=20261009-1"></script>
+    <script src="severe-weather.js?v=20261009-5"></script>
+    <script src="app.js?v=20261009-5"></script>
   </body>
 </html>

@@ -107,6 +107,36 @@ Current temperature, humidity, wind, visibility and feels-like use measured valu
 
 Active Tornado Warnings and Flash Flood Warnings appear in a translucent red banner pinned to the top of either page for its selected location. The forecast banner refreshes every minute. The NC Status banner follows the five-minute statewide-alert refresh and county selection. Expired warnings are removed; if updates fail, unexpired last-known warnings remain with an update-unavailable notice.
 
+### Forecast discussion
+
+After a location resolves, the forecast page requests the latest Area Forecast Discussion (AFD) from the location's forecast office (`/products/types/AFD/locations/<office>/latest` on api.weather.gov, one request that includes the text). The product list endpoint is not used because it has been observed serving week-old entries whose products no longer exist. The section shows the issuing office, the issue time in the location's time zone and its age. The text is the forecasters' own technical writing shown verbatim: it is split into its `.HEADER...` sections for easier reading once the reader opens the section, the complete original product text is always available, and nothing is summarized, reworded or interpreted. A discussion more than 24 hours old is labeled as such. The section links to the official discussion on weather.gov. If the discussion cannot be loaded, the section says so (and keeps the official link) without affecting the rest of the forecast; the next refresh tries again.
+
+### Severe weather mode
+
+A "Severe weather" panel appears at the top of the forecast page whenever the selected point has an active NWS **Warning** of any type (`/alerts/active?point=`). Watches and advisories never open it. Active uses the same rule as the rest of the app: status `Actual`, not a `Cancel`, `ends` (or `expires`) in the future, and `effective`/`onset` not in the future. Warnings are ordered Tornado, Extreme Wind, Severe Thunderstorm, Flash Flood, Hurricane, Storm Surge, Tropical Storm, Blizzard, Ice Storm, Winter Storm, then all other warnings, and by soonest expiry within a type.
+
+Each warning shows the NWS headline, area, sender, effective time, expiry (with minutes remaining, refreshed each minute), the detection, hail, wind-gust and damage-threat parameters when NWS supplies them, the full description and the "What to do" instruction. NWS text is shown exactly as published (inserted as text, never reworded or summarized) and links to the official `api.weather.gov` alert. The panel can be minimized to a one-line summary; it expands again only when a warning that was not present at minimize time appears. The freshness line gives the alerts check time and latest radar scan; if alert polling is failing, a notice says the warnings shown are the last received. "Show local radar" scrolls to and focuses the radar section without changing a manually selected radar.
+
+Power outage counts are shown for North Carolina counties only, read from the same `data/nc-status.json` snapshot as the NC Status page (at most once every 5 minutes while the panel is shown). The county comes from the NWS point response. Freshness follows NC Status: data up to 45 minutes old is current, up to 60 minutes is stale, and older data is "current update unavailable"; stale or older values are always labeled "Last known ... as of ...". Other states see a note that outage data is NC-only. The snapshot appears in "Data sources" as "NC outage snapshot" once used.
+
+### Data source health
+
+A collapsed "Data sources" panel at the bottom of the forecast page (and a small "Data sources: all current / 1 stale / 2 issues" pill under the hero's updated label, which opens and focuses the panel) shows the state of each upstream provider: NWS forecast, station observation, gridpoint precipitation, alerts and forecast discussion, radar, the ZIP lookup (listed only after it has been used) and the USGS basemap (listed once its tiles have loaded or failed). Each row gives a status, the clock time of the last successful update in the location's time zone, how old the data is, and a short explanation. The radar row names the active provider and, when NWS super-resolution failed, says that the RainViewer HD fallback is active.
+
+Health is derived only from requests the app already makes. There is no extra polling and no separate probe request, and ages refresh once a minute only while the page is visible. A source that already has good data keeps showing it while it re-checks, and a failed refresh keeps the last good data's age ("Last good data: 20 min old"). Records for location-dependent sources go back to "Checking" when the location changes, and responses from superseded loads never update them.
+
+Data is flagged stale when:
+
+- the forecast's generation time is more than 3 hours old;
+- the station observation is older than 90 minutes (the same limit that sends the hero panel back to the forecast values);
+- the last successful alerts check (alerts are polled every minute) is more than 5 minutes old;
+- the newest radar scan is more than 30 minutes old;
+- the forecast discussion was issued more than 24 hours ago.
+
+Errors are classified so a provider outage is not mistaken for a bug. A provider error is an HTTP error status, timeout, network failure, unparseable response, or an upstream response the app cannot use (for example NWS returning no forecast endpoints); an offline error means the device has no connection; an app error is an unexpected exception from this page's own code. App errors are caught per rendering step so the rest of the page keeps working, and the row tells the reader to reload and report the problem if it persists. Cancelled requests are never recorded as failures.
+
+Scheduled monitoring for the NC Status data already exists in `monitor-status.yml` (see "Refresh monitoring and investigation"); the forecast page's health is derived from its real requests rather than from a scheduled check, so it reflects what the visitor is actually receiving.
+
 ## Privacy and scope
 
 Forecast and ZIP requests go directly from the browser to their named providers. On NC Status, device coordinates are used only in memory to match the bundled county geometry and are neither transmitted nor saved. ZIP lookup sends the entered ZIP to Zippopotam.us. The optional remembered setting stores only the selected county FIPS code.
