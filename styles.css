@@ -2075,6 +2075,15 @@ a:hover {
     display: none;
   }
 
+  /* Leaves room for wider fallback fonts when Inter is unavailable. */
+  .topbar-tools {
+    gap: 6px;
+  }
+
+  .page-nav-link {
+    padding-inline: 6px;
+  }
+
   .metric-grid {
     grid-template-columns: 1fr;
   }
