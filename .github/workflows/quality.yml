@@ -21,13 +21,7 @@ jobs:
       - name: Check JavaScript syntax
         run: |
           node --check app.js
-          node --check alert-geography.js
           node --check severe-weather.js
-          node --check status.js
-          node --check scripts/nc-status.mjs
-          node --check scripts/refresh-nc-status.mjs
-          node --check scripts/verify-nc-status.mjs
-          node --check scripts/check-nc-status.mjs
           node --check tests/browser/smoke.mjs
       - name: Run regression tests
         run: node --test

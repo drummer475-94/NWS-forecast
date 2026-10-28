@@ -1,6 +1,6 @@
 # Browser smoke tests
 
-`smoke.mjs` drives the forecast page (`index.html`) and the NC Status page (`status.html`) in headless Chromium at
+`smoke.mjs` drives the forecast page (`index.html`) in headless Chromium at
 320x640, 375x812 and 1280x900. It needs no network: it serves the repository from its own static server and answers
 every external host (NWS, NOAA radar, RainViewer, USGS, Zippopotam.us, unpkg) from `fixtures/`. A request to any other
 host is aborted and fails the run, as do uncaught page errors and console errors that are not on the specific allow-list

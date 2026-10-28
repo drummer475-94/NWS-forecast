@@ -31,11 +31,6 @@ const FORECAST_STALE_MS = 3 * 60 * 60 * 1000;
 const ALERTS_STALE_MS = 5 * 60 * 1000;
 const RADAR_STALE_MS = 30 * 60 * 1000;
 const SOURCE_HEALTH_TICK_MS = 60 * 1000;
-// Severe weather mode: how often the NC outage snapshot may be re-read while the panel is shown.
-const OUTAGE_REFRESH_MS = 5 * 60 * 1000;
-// Matches POWER_FRESH_MS in status.js: power data older than this is no longer "current".
-const OUTAGE_STALE_MS = 45 * 60 * 1000;
-const OUTAGE_SNAPSHOT_URL = 'data/nc-status.json';
 const SEVERE_TICK_MS = 60 * 1000;
 const TRANSPARENT_TILE = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
 
@@ -75,7 +70,6 @@ const SOURCE_DEFS = [
   { key: 'alerts', name: 'NWS alerts', maxAgeMs: ALERTS_STALE_MS, byLocation: true },
   { key: 'discussion', name: 'NWS forecast discussion', maxAgeMs: DISCUSSION_STALE_MS, byLocation: true },
   { key: 'radar', name: 'Radar', maxAgeMs: RADAR_STALE_MS },
-  { key: 'outages', name: 'NC outage snapshot', maxAgeMs: OUTAGE_STALE_MS, optional: true },
   { key: 'zip', name: 'ZIP lookup (Zippopotam.us)', maxAgeMs: 0, optional: true },
   { key: 'basemap', name: 'USGS basemap', maxAgeMs: 0, optional: true, noAge: true }
 ];
@@ -148,18 +142,12 @@ const state = {
   sourceHealthTimer: 0,
   sourceHealthSignature: '',
   // Severe weather mode
-  countyFips: '',
-  countyStatus: 'pending',
   severeTimer: 0,
   severeKey: '',
   severeAnnouncedKey: '',
   severeMinimizedIds: new Set(),
   severeDetailsOpen: new Map(),
-  severeCardsSignature: '',
-  outageSnapshot: null,
-  outageFailed: false,
-  outageCheckedAt: 0,
-  outageController: null
+  severeCardsSignature: ''
 };
 
 const el = {
@@ -199,8 +187,6 @@ const el = {
   severeNotice: document.querySelector('#severeNotice'),
   severeAlerts: document.querySelector('#severeAlerts'),
   severeRadarButton: document.querySelector('#severeRadarButton'),
-  severeOutageText: document.querySelector('#severeOutageText'),
-  severeOutageLink: document.querySelector('#severeOutageLink'),
   radarHeading: document.querySelector('#radarHeading'),
   sourceHealth: document.querySelector('#sourceHealth'),
   sourceHealthList: document.querySelector('#sourceHealthList'),
@@ -546,8 +532,6 @@ async function loadForecast(lat, lon) {
       getLocationKey(state.lat, state.lon),
       formatRelativeLocation(props.relativeLocation)
     );
-    state.countyFips = NwsSevereWeather.countyFipsFromPoint(props);
-    state.countyStatus = 'known';
     renderSevereMode();
     renderSunTimes(state.lat, state.lon);
     const previousRadarStation = state.radarStation;
@@ -639,10 +623,6 @@ async function loadForecast(lat, lon) {
     if (isAbortError(error) || !isCurrentForecastLoad(load)) return;
     console.error(error);
     markSourceFailure('forecast', error, 'The forecast could not be loaded.');
-    if (state.countyStatus === 'pending') {
-      state.countyStatus = 'failed';
-      renderSevereMode();
-    }
     idleUnstartedLocationSources('Not requested because the forecast lookup failed.');
     showToast(friendlyForecastError(error));
     el.updatedLabel.textContent = 'Forecast unavailable. Try again or choose a nearby ZIP code.';
@@ -657,7 +637,7 @@ async function loadForecast(lat, lon) {
 
 // ---------------------------------------------------------------------------------------------
 // Severe weather mode. Shown whenever the selected point has an active NWS Warning. The pure
-// selection, expiry and outage logic lives in severe-weather.js; NWS text is inserted with
+// selection and expiry logic lives in severe-weather.js; NWS text is inserted with
 // textContent only and never reworded.
 
 function formatSevereTime(value, nowMs) {
@@ -706,16 +686,8 @@ function updateSevereFreshness() {
 }
 
 function resetSevereLocation() {
-  if (state.outageController) state.outageController.abort();
-  state.outageController = null;
-  state.outageSnapshot = null;
-  state.outageFailed = false;
-  state.outageCheckedAt = 0;
-  state.countyFips = '';
-  state.countyStatus = 'pending';
   state.severeMinimizedIds = new Set();
   state.severeDetailsOpen = new Map();
-  state.sourceHealth.outages = createSourceRecord();
   renderSevereMode();
 }
 
@@ -811,11 +783,6 @@ function hideSeverePanel() {
   state.severeKey = '';
   state.severeAnnouncedKey = '';
   state.severeCardsSignature = '';
-  if (state.outageController) {
-    state.outageController.abort();
-    state.outageController = null;
-    state.outageCheckedAt = 0;
-  }
   el.severeAnnouncer.textContent = '';
   el.severePanel.classList.add('hidden');
 }
@@ -867,8 +834,6 @@ function renderSevereMode() {
   }
 
   updateSevereFreshness();
-  renderSevereOutage(now);
-  maybeRefreshOutages(now);
 
   if (!document.hidden) {
     const nextExpiry = Math.min.apply(null, alerts.map(function (alert) { return Date.parse(alert.endsAt); }));
@@ -889,78 +854,6 @@ function showLocalRadar() {
   // Navigation only: a radar the user chose by hand is never overridden.
   el.radarHeading.scrollIntoView({ block: 'start', behavior: reduceMotion ? 'auto' : 'smooth' });
   el.radarHeading.focus({ preventScroll: true });
-}
-
-function outageTimeFormatter(nowMs) {
-  return function (iso) {
-    const ms = Date.parse(iso);
-    return Math.abs(nowMs - ms) < 12 * 3600000 ? formatClockTime(new Date(ms)) : formatDateTime(iso);
-  };
-}
-
-function renderSevereOutage(now) {
-  let text;
-  let showLink = false;
-  if (state.countyStatus === 'pending') {
-    text = 'Checking power outage availability…';
-  } else if (state.countyStatus === 'failed') {
-    text = 'Power outage availability could not be determined because the location lookup failed.';
-  } else if (!NwsSevereWeather.isNorthCarolinaFips(state.countyFips)) {
-    text = NwsSevereWeather.formatOutageSummary({ supported: false });
-  } else if (state.outageSnapshot) {
-    const outage = NwsSevereWeather.countyOutageFromSnapshot(state.outageSnapshot, state.countyFips, now);
-    text = NwsSevereWeather.formatOutageSummary(outage, outageTimeFormatter(now));
-    if (state.outageFailed) text += ' The latest refresh failed.';
-    showLink = true;
-  } else if (state.outageFailed) {
-    text = 'Outage data for this county is unavailable right now. Try the NC outage page below.';
-    showLink = true;
-  } else {
-    text = 'Checking power outage data…';
-  }
-  if (el.severeOutageText.textContent !== text) el.severeOutageText.textContent = text;
-  el.severeOutageLink.classList.toggle('hidden', !showLink);
-}
-
-// Same-origin snapshot, read only for NC locations while the severe panel is shown, at most every 5 minutes.
-function maybeRefreshOutages(now) {
-  if (document.hidden || state.outageController || state.countyStatus !== 'known') return;
-  if (!NwsSevereWeather.isNorthCarolinaFips(state.countyFips)) return;
-  if (state.outageCheckedAt && now - state.outageCheckedAt < OUTAGE_REFRESH_MS) return;
-  refreshOutages();
-}
-
-async function refreshOutages() {
-  const controller = new AbortController();
-  state.outageController = controller;
-  state.outageCheckedAt = Date.now();
-  const locationKey = getLocationKey(state.lat, state.lon);
-  markSourcePending('outages');
-  try {
-    const snapshot = await fetchJson(OUTAGE_SNAPSHOT_URL + '?v=' + Date.now(), {
-      headers: { Accept: 'application/json' },
-      cache: 'no-store',
-      signal: controller.signal
-    });
-    if (controller.signal.aborted || locationKey !== getLocationKey(state.lat, state.lon)) return;
-    if (!snapshot || typeof snapshot !== 'object' || !Array.isArray(snapshot.power) || !snapshot.sources) {
-      throw providerError('The NC outage snapshot has an unexpected format.');
-    }
-    state.outageSnapshot = snapshot;
-    state.outageFailed = false;
-    const power = snapshot.sources.power;
-    const asOf = Date.parse(power && power.lastSuccessAt);
-    markSourceSuccess('outages', asOf, 'County outage counts from the NC Emergency Management snapshot published with this site.');
-  } catch (error) {
-    if (isAbortError(error) || controller.signal.aborted) return;
-    state.outageFailed = true;
-    markSourceFailure('outages', error, 'Power outage counts could not be loaded.');
-  } finally {
-    if (state.outageController === controller) {
-      state.outageController = null;
-      renderSevereOutage(Date.now());
-    }
-  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1916,7 +1809,7 @@ async function refreshLocationAlerts() {
   }
 }
 
-// Same active-alert rule as NC Status: an Actual, non-canceled message before its expires/ends time.
+// Active-alert rule: an Actual, non-canceled message before its expires/ends time.
 function isActiveAlert(alert, now) {
   if (!alert || alert.status !== 'Actual' || alert.messageType === 'Cancel') return false;
   const expiry = Date.parse(alert.ends || alert.expires);

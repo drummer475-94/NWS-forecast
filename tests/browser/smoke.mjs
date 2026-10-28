@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Deterministic browser smoke suite for the forecast and NC Status pages.
+// Deterministic browser smoke suite for the forecast page.
 //
 // Runs with plain Node (no package.json in this repo): it starts its own static server, launches Chromium
 // through Playwright, and answers every external request (NWS, NOAA, RainViewer, USGS, Zippopotam.us, unpkg)
@@ -151,26 +151,6 @@ async function fixtureJson(name, nowMs = Date.now()) {
   return JSON.parse(stampTimes(await readFixtureText(name), nowMs));
 }
 
-async function statusSnapshot(nowMs = Date.now()) {
-  const snapshot = await fixtureJson('nc-status-snapshot.json', nowMs);
-  const geojson = JSON.parse(await fs.readFile(path.join(repoRoot, 'data', 'nc-counties.geojson'), 'utf8'));
-  const overrides = snapshot.powerOverrides || {};
-  delete snapshot.powerOverrides;
-  snapshot.power = geojson.features
-    .map((feature) => ({
-      countyFips: String(feature.properties.GEOID),
-      countyName: String(feature.properties.NAME).replace(/\s+County$/i, '')
-    }))
-    .sort((a, b) => a.countyFips.localeCompare(b.countyFips))
-    .map((county) => ({
-      ...county,
-      customersOut: 0,
-      customersServed: 50_000,
-      ...(overrides[county.countyFips] || {})
-    }));
-  return snapshot;
-}
-
 // ---------------------------------------------------------------------------------------------------------
 // External-host stubs
 
@@ -196,10 +176,6 @@ async function installStubs(context, baseOrigin, stubState) {
     const url = new URL(request.url());
 
     if (url.origin === baseOrigin) {
-      if (url.pathname === '/data/nc-status.json') {
-        hit('local nc-status.json (fixture)');
-        return json(route, await statusSnapshot());
-      }
       return route.continue();
     }
 
@@ -233,7 +209,6 @@ async function installStubs(context, baseOrigin, stubState) {
         const now = Date.now();
         if (/^\/points\/-?\d+(\.\d+)?,-?\d+(\.\d+)?$/.test(p)) {
           const point = await fixtureJson('nws-points.json', now);
-          if (stubState.pointCounty) point.properties.county = stubState.pointCounty;
           return json(route, point, 200, 'application/geo+json');
         }
         if (p === '/gridpoints/RAH/73,57/forecast') return json(route, await fixtureJson('nws-daily.json', now), 200, 'application/geo+json');
@@ -251,7 +226,6 @@ async function installStubs(context, baseOrigin, stubState) {
           const name = stubState.pointAlerts === 'multi' ? 'nws-alerts-point-multi.json' : 'nws-alerts-point.json';
           return json(route, await fixtureJson(name, now), 200, 'application/geo+json');
         }
-        if (p === '/alerts/active' && url.searchParams.get('area') === 'NC') return json(route, await fixtureJson('nws-alerts-nc.json', now), 200, 'application/geo+json');
         if (p === '/products/types/AFD/locations/RAH/latest') {
           if (stubState.afdListStatus) { hit('AFD latest (failure stub)'); return json(route, {}, stubState.afdListStatus); }
           hit('AFD product');
@@ -403,7 +377,7 @@ async function expectNoHorizontalScroll(page, where) {
 async function checkThemeToggle(page) {
   const button = page.locator('#themeToggleButton');
   const before = await page.evaluate(() => document.documentElement.getAttribute('data-theme'));
-  // The forecast page leaves data-theme unset until the visitor chooses; NC Status pins the OS theme at start.
+  // The forecast page leaves data-theme unset until the visitor chooses.
   expect(before === null || before === 'dark', `expected the dark OS theme initially, got data-theme=${before}`);
   expectEqual(await button.getAttribute('aria-pressed'), 'false', 'aria-pressed before toggle (dark OS scheme)');
   await button.click();
@@ -586,7 +560,6 @@ async function runForecastScenario(browser, baseOrigin, viewport, perfOut) {
 
   await step('severe weather mode: panel, warning text verbatim, expiry, official link, banner link', async () => {
     await page.waitForFunction(() => !document.querySelector('#severePanel').classList.contains('hidden'));
-    await page.waitForFunction(() => /customers without power/.test(document.querySelector('#severeOutageText').textContent));
     expect(await page.locator('#severePanel').isVisible(), 'severe panel hidden');
     expectEqual((await page.locator('#severeHeading').textContent()).trim(), 'Severe weather', 'heading');
     expectMatch(await page.locator('#severeLocation').textContent(), /^Active warnings for Raleigh, NC$/, 'location line');
@@ -616,15 +589,10 @@ async function runForecastScenario(browser, baseOrigin, viewport, perfOut) {
     return expectNoHorizontalScroll(page, 'severe panel');
   });
 
-  await step('severe weather mode: freshness line and Wake County outage line with link', async () => {
+  await step('severe weather mode: freshness line', async () => {
     await page.waitForFunction(() => /Latest radar scan/.test(document.querySelector('#severeFreshness').textContent));
     expectMatch(await page.locator('#severeFreshness').textContent(), /^Alerts checked \d{1,2}:\d{2} [AP]M · Latest radar scan \d{1,2}:\d{2} [AP]M$/, 'freshness line');
     expect(await page.locator('#severeNotice').isHidden(), 'no stale-alerts notice while alerts are current');
-    expectMatch(await page.locator('#severeOutageText').textContent(), /^1,234 customers without power in Wake County \(NC Emergency Management, as of \d{1,2}:\d{2} [AP]M\)$/, 'outage line');
-    const link = page.locator('#severeOutageLink');
-    expectEqual((await link.textContent()).trim(), 'NC outage and alert status', 'outage link text');
-    expectEqual(await link.getAttribute('href'), 'status.html', 'outage link href');
-    expectEqual(stubState.hits.get('local nc-status.json (fixture)'), 1, 'one snapshot request');
   });
 
   await step('severe weather mode: radar button scrolls to and focuses the radar heading (mouse and keyboard)', async () => {
@@ -811,12 +779,6 @@ async function runForecastScenario(browser, baseOrigin, viewport, perfOut) {
     return expectNoHorizontalScroll(page, 'health panel open');
   });
 
-  await step('data source health lists the NC outage snapshot as Current once severe mode used it', async () => {
-    expectEqual((await page.locator('#sourceHealthList li[data-source="outages"] .health-name').textContent()).trim(), 'NC outage snapshot', 'outage row name');
-    expectEqual((await page.locator('#sourceHealthList li[data-source="outages"] .health-status').textContent()).trim(), 'Current', 'outage row status');
-    expectMatch(await page.locator('#sourceHealthList li[data-source="outages"] .health-facts').textContent(), /Data age\s*(\d+ min old|under 1 min old)/, 'outage data age');
-  });
-
   await step('no horizontal scroll (after forecast load)', () => expectNoHorizontalScroll(page, 'after load'));
 
   await screenshot(page, `forecast-${label}`);
@@ -855,81 +817,6 @@ async function runForecastScenario(browser, baseOrigin, viewport, perfOut) {
   }
 
   await finishScenarioPage(label, 'forecast', handle);
-}
-
-// ---------------------------------------------------------------------------------------------------------
-// Scenario: NC Status page
-
-async function runStatusScenario(browser, baseOrigin, viewport) {
-  const label = `${viewport.width}x${viewport.height}`;
-  const handle = await newScenarioPage(browser, baseOrigin, viewport);
-  const { page } = handle;
-  const step = makeRunner(label, 'status');
-
-  async function waitForStatusLoaded() {
-    await page.waitForFunction(() =>
-      document.querySelectorAll('#countySelect option').length === 100 &&
-      document.querySelector('#overallStatusPill').dataset.state === 'fresh' &&
-      document.querySelectorAll('#statusMap path.leaflet-interactive').length >= 100);
-  }
-
-  await step('loads the fixture snapshot with fresh sources', async () => {
-    await page.goto(`${baseOrigin}/status.html`, { waitUntil: 'load' });
-    await waitForStatusLoaded();
-    expectEqual((await page.locator('#overallStatusPill').textContent()).trim(), 'Sources current', 'overall status');
-    expectEqual((await page.locator('#selectedCountyName').textContent()).trim(), 'Wake County', 'default county');
-    const power = (await page.locator('#powerFreshness').textContent()).trim();
-    expectMatch(power, /^Current /, 'power freshness');
-    return `${power}; 100 counties in the list and on the map`;
-  });
-
-  await step('Wake County shows its outage count and the county alert', async () => {
-    await page.locator('#countySelect').selectOption('37183');
-    expectEqual((await page.locator('#selectedCountyName').textContent()).trim(), 'Wake County', 'selected county');
-    expectEqual((await page.locator('#powerTotal').textContent()).trim(), '1,234', 'summary outage count');
-    expectEqual((await page.locator('#powerDetailTotal').textContent()).trim(), '1,234', 'detail outage count');
-    expectEqual((await page.locator('#alertTotal').textContent()).trim(), '1', 'alert total');
-    const cards = page.locator('#statusAlertList .status-alert-card');
-    expectEqual(await cards.count(), 1, 'county alert cards');
-    expectMatch(await cards.first().textContent(), /Flood Watch/, 'county alert');
-    const link = cards.first().getByRole('link', { name: 'View official NWS alert' });
-    expectMatch(await link.getAttribute('href'), /smoke\.flood$/, 'county alert link');
-    expect(!/Special Weather Statement/.test(await page.locator('#statusAlertList').textContent()), 'unmatched alert leaked into the county list');
-  });
-
-  await step('unmatched alert is listed separately with its official link', async () => {
-    const section = page.locator('#statusUnmatchedAlerts');
-    expect(await section.isVisible(), 'unmatched section is hidden');
-    expectMatch(await section.textContent(), /1 NWS alert could not be matched to a county/, 'unmatched message');
-    const link = section.getByRole('link', { name: /Special Weather Statement .*official NWS details/ });
-    expectEqual(await link.count(), 1, 'unmatched alert link');
-    expectMatch(await link.getAttribute('href'), /smoke\.unmatched$/, 'unmatched alert href');
-  });
-
-  await step('another county does not show the Wake or unmatched alert as a county alert', async () => {
-    await page.locator('#countySelect').selectOption('37001');
-    expectEqual((await page.locator('#selectedCountyName').textContent()).trim(), 'Alamance County', 'selected county');
-    expectEqual((await page.locator('#powerTotal').textContent()).trim(), '0', 'outage count');
-    expectEqual(await page.locator('#statusAlertList .status-alert-card').count(), 0, 'county alert cards');
-    const text = await page.locator('#statusAlertList').textContent();
-    expect(!/Flood Watch|Special Weather Statement/.test(text), `county list still mentions a foreign alert: ${text.trim()}`);
-    expectMatch(text, /No active NWS alerts apply to this county/, 'empty county alert copy');
-    expectEqual((await page.locator('#alertTotal').textContent()).trim(), '0', 'alert total');
-    expect(await page.locator('#statusUnmatchedAlerts').isVisible(), 'unmatched alerts must stay listed for every county');
-  });
-
-  await step('no horizontal scroll', () => expectNoHorizontalScroll(page, 'status page'));
-
-  await screenshot(page, `status-${label}`);
-
-  await step('theme toggle switches data-theme and persists', async () => {
-    const detail = await checkThemeToggle(page);
-    await waitForStatusLoaded();
-    await expectNoHorizontalScroll(page, 'status page after reload');
-    return detail;
-  });
-
-  await finishScenarioPage(label, 'status', handle);
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1208,28 +1095,14 @@ async function runSevereVariantsScenario(browser, baseOrigin, viewport) {
 
   const none = await newScenarioPage(browser, baseOrigin, viewport);
   none.stubState.pointAlerts = 'none';
-  await step('no warnings: severe panel and banner stay hidden and no outage snapshot is requested', async () => {
+  await step('no warnings: severe panel and banner stay hidden', async () => {
     await loadZipForecast(none.page, baseOrigin);
     await none.page.waitForFunction(() => document.querySelector('#alertsCount').textContent.trim() === 'None');
     expect(await none.page.locator('#severePanel').isHidden(), 'severe panel visible without warnings');
     expect(await none.page.locator('#warningBanner').isHidden(), 'banner visible without warnings');
-    expectEqual(none.stubState.hits.get('local nc-status.json (fixture)') || 0, 0, 'snapshot requests');
-    expectEqual(await none.page.locator('#sourceHealthList li[data-source="outages"]').count(), 0, 'outage source is listed only after use');
     return expectNoHorizontalScroll(none.page, 'no warnings');
   });
   await finishScenarioPage(label, 'severe-variants none', none);
-
-  const outside = await newScenarioPage(browser, baseOrigin, viewport);
-  outside.stubState.pointCounty = 'https://api.weather.gov/zones/county/TXC201';
-  await step('non-NC location: warnings shown, outage line says North Carolina only, no snapshot request', async () => {
-    await loadZipForecast(outside.page, baseOrigin);
-    await outside.page.waitForFunction(() => !document.querySelector('#severePanel').classList.contains('hidden'));
-    await outside.page.waitForFunction(() => /North Carolina locations only/.test(document.querySelector('#severeOutageText').textContent));
-    expectEqual((await outside.page.locator('#severeOutageText').textContent()).trim(), 'Power outage data is available for North Carolina locations only.', 'unsupported line');
-    expect(await outside.page.locator('#severeOutageLink').isHidden(), 'status link hidden for non-NC');
-    expectEqual(outside.stubState.hits.get('local nc-status.json (fixture)') || 0, 0, 'snapshot requests');
-  });
-  await finishScenarioPage(label, 'severe-variants outside NC', outside);
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1248,7 +1121,7 @@ try {
   );
   console.log(`Chromium ${browser.version()}`);
   for (const viewport of VIEWPORTS) {
-    for (const scenario of [runForecastScenario, runDiscussionFailureScenario, runRadarSourceScenario, runIconFallbackScenario, runSevereVariantsScenario, runStatusScenario]) {
+    for (const scenario of [runForecastScenario, runDiscussionFailureScenario, runRadarSourceScenario, runIconFallbackScenario, runSevereVariantsScenario]) {
       try {
         await scenario(browser, baseOrigin, viewport, perf);
       } catch (error) {
