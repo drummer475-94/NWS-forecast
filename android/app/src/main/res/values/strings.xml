@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Local Weather</string>
+    <string name="location_denied">Location permission denied. Search by ZIP code instead.</string>
+    <string name="no_browser">No app available to open this link.</string>
+</resources>

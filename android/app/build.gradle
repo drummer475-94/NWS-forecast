@@ -1,0 +1,88 @@
+plugins {
+    id 'com.android.application'
+}
+
+// The web app (index.html, styles.css, app.js, severe-weather.js) stays the single
+// source of truth at the repository root. It is copied into the APK's assets at build
+// time so the Android app never drifts from the website.
+def webRoot = rootProject.file('..')
+def generatedWebAssets = layout.buildDirectory.dir('generated/webAssets')
+
+def syncWebAssets = tasks.register('syncWebAssets', Sync) {
+    from(webRoot) {
+        include 'index.html', 'styles.css', 'app.js', 'severe-weather.js'
+    }
+    into generatedWebAssets
+}
+
+// Optional release signing: create android/keystore.properties (git-ignored) with
+// storeFile, storePassword, keyAlias, keyPassword. Without it, release builds fall
+// back to the debug key so `assembleRelease` still produces an installable APK.
+def keystorePropsFile = rootProject.file('keystore.properties')
+def keystoreProps = new Properties()
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+
+android {
+    namespace 'gov.nws.localweather'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'io.github.drummer475.nwslocalweather'
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName '1.0.0'
+    }
+
+    signingConfigs {
+        release {
+            if (keystorePropsFile.exists()) {
+                storeFile rootProject.file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig keystorePropsFile.exists() ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    sourceSets {
+        main {
+            assets.srcDirs += generatedWebAssets
+        }
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    dependenciesInfo {
+        includeInApk false
+        includeInBundle false
+    }
+}
+
+tasks.named('preBuild') { dependsOn syncWebAssets }
+
+dependencies {
+    // Aligns kotlin-stdlib-jdk7/jdk8 pulled in transitively by AndroidX with kotlin-stdlib.
+    implementation platform('org.jetbrains.kotlin:kotlin-bom:1.8.22')
+    implementation 'androidx.webkit:webkit:1.12.1'
+    implementation 'androidx.core:core:1.13.1'
+    implementation 'androidx.activity:activity:1.9.3'
+}

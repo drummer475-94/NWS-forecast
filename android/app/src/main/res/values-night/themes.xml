@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.LocalWeather" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/app_background</item>
+        <item name="android:colorBackground">@color/app_background</item>
+        <item name="android:statusBarColor">@color/app_background</item>
+        <item name="android:navigationBarColor">@color/app_background</item>
+        <item name="android:colorAccent">@color/brand_sky</item>
+    </style>
+</resources>

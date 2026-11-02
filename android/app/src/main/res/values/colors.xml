@@ -1,0 +1,7 @@
+<resources>
+    <color name="app_background">#EEF2F7</color>
+    <color name="icon_background">#0A1420</color>
+    <color name="brand_sky">#61D6F3</color>
+    <color name="brand_deep">#113A53</color>
+    <color name="brand_sun">#FFF3AD</color>
+</resources>

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Upper sky half of the disc -->
+    <path android:fillColor="#61D6F3"
+        android:pathData="M28,54 A26,26 0 0,1 80,54 Z" />
+    <!-- Lower deep half of the disc -->
+    <path android:fillColor="#113A53"
+        android:pathData="M28,54 A26,26 0 0,0 80,54 Z" />
+    <!-- Sun -->
+    <path android:fillColor="#FFF3AD"
+        android:pathData="M54,33 m-7,0 a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0" />
+    <!-- Horizon line -->
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="1.5" android:strokeAlpha="0.7"
+        android:pathData="M33,54 L75,54" />
+    <!-- Low arc -->
+    <path android:fillColor="#61D6F3" android:fillAlpha="0.45"
+        android:pathData="M30,64 Q54,56 78,62 Q54,72 30,64 Z" />
+</vector>

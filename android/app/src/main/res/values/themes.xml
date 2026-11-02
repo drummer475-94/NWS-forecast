@@ -1,0 +1,12 @@
+<resources>
+    <!-- Light/dark variants let the WebView's prefers-color-scheme follow the system
+         setting, matching the website's default behaviour. -->
+    <style name="Theme.LocalWeather" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/app_background</item>
+        <item name="android:colorBackground">@color/app_background</item>
+        <item name="android:statusBarColor">@color/app_background</item>
+        <item name="android:navigationBarColor">@color/app_background</item>
+        <item name="android:windowLightStatusBar">@bool/light_system_bars</item>
+        <item name="android:colorAccent">@color/brand_sky</item>
+    </style>
+</resources>

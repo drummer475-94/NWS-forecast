@@ -26,6 +26,27 @@ node --test
 
 Browser smoke tests (forecast page at 320, 375 and 1280 px, with every external provider stubbed) run in CI as the `browser-smoke` job. See [`tests/browser/README.md`](tests/browser/README.md) to run them locally.
 
+## Android app
+
+`android/` wraps the same web app in a native Android shell (min Android 7.0, target Android 15) that you can sideload as an APK.
+
+- The root `index.html`, `styles.css`, `app.js` and `severe-weather.js` are copied into the APK at build time, so the website stays the single source of truth. They are served from the secure `https://appassets.androidplatform.net` origin, so geolocation and saved preferences work as they do on the web.
+- Leaflet 1.9.4 is bundled (`android/app/src/main/assets/vendor/leaflet`, byte-identical to the unpkg copy, so the page's SRI hashes still pass); the app shell and map library load without a network round trip. Weather, alert, radar and map data are still fetched live.
+- Requests carry an identifying `NWSLocalWeatherAndroid/<version>` User-Agent suffix for api.weather.gov.
+- Location permission is requested only when the page asks for your position; denying it leaves ZIP lookup available.
+- External links (NWS details, attributions) open in your browser. Timers pause while the app is in the background to save battery and data.
+
+Build it with JDK 17+ and the Android SDK (platform 35):
+
+```sh
+cd android
+./gradlew assembleRelease
+```
+
+The APK is written to `android/app/build/outputs/apk/release/app-release.apk`. To sign it with your own key, create the git-ignored `android/keystore.properties` with `storeFile`, `storePassword`, `keyAlias` and `keyPassword`; without it the release build is signed with the local debug key. Android only installs an update over an existing install when it is signed with the same key, so keep your keystore.
+
+To install, copy the APK to your phone, open it, and allow "Install unknown apps" for the app you opened it from when Android asks.
+
 ## Alerts
 
 An alert is active only when it is an `Actual` message (not Test, Exercise, System or Draft), is not a cancellation, and has not passed its `expires` or `ends` time. Alerts come from the NWS point query for the selected location, and each card links to its official NWS details.
